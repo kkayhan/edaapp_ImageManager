@@ -406,7 +406,8 @@ class Handler(BaseHTTPRequestHandler):
         filename = uploads.sanitize_filename(one("filename", ""))
         # repo is a single fixed grouping (Artifact requires one); not user-facing.
         repo = (CONFIG.get("defaultRepo") or "images").strip()
-        namespace = (one("namespace") or CONFIG.get("defaultArtifactNamespace", "eda")).strip()
+        # No default namespace: the UI forces an explicit pick, so require one here too.
+        namespace = (one("namespace") or "").strip()
         # The user-facing image name (e.g. "SRLinux-26.3.2"). Defaults to a name
         # derived from the filename; becomes the Artifact identity + served path.
         display_name = (one("name") or "").strip() or uploads.derive_name(filename)
@@ -419,6 +420,9 @@ class Handler(BaseHTTPRequestHandler):
 
         if not filename:
             self._send_json({"ok": False, "error": "filename query param required"}, 400)
+            return
+        if not namespace:
+            self._send_json({"ok": False, "error": "namespace query param required"}, 400)
             return
         if not artifact_name:
             self._send_json({"ok": False, "error": "could not derive a valid image name"}, 400)

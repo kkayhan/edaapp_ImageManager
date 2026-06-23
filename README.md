@@ -80,12 +80,13 @@ Open that URL in the same browser where you're logged into the EDA UI (the EDA l
 
 **Using it:**
 
-Click **Upload image** (top right) to open the upload dialog, then:
+Click **Upload Image From File** (top right) to open the upload dialog, then:
 
 1. **Pick the image file** — either the raw `.bin`, or the **vendor `.zip`** (e.g. `Nokia-7220_IXR_SR_Linux-<hw>-26.3.2.zip`). For a zip, the app extracts the `.bin` and reads the packaged `.md5` automatically. The **Image name** fills in automatically (SR Linux images become `SRLinux-<version>`) — edit it if you like; it becomes the artifact's name and its artifact‑server path.
-2. *(Optional, raw `.bin` only)* **Paste the vendor's MD5 hash** so EDA can verify the download, and change the **Namespace** if it shouldn't be `eda`. When you upload a zip, the MD5 field is ignored — the trusted checksum packaged inside the zip is used instead.
-3. **Click Upload.** A progress bar shows size, percentage, and speed.
-4. The image appears in the **Artifacts** table and turns **`Available`** once `eda-asvr` has fetched it. Each row then shows a ready‑to‑paste **NodeProfile** snippet — click **copy** to grab it, or **delete** to remove the image (which also drops `eda-asvr`'s hosted copy, and the md5 if there was one).
+2. **Choose the Namespace** — pick the target EDA namespace from the dropdown. There's no default; you must select one before uploading.
+3. *(Optional, raw `.bin` only)* **Paste the vendor's MD5 hash** so EDA can verify the download. When you upload a zip, the MD5 field is ignored — the trusted checksum packaged inside the zip is used instead.
+4. **Click Upload.** The dialog closes and the image appears in the table right away as **Uploading** (with size, percentage, speed, and elapsed time), then **Un‑zipping** for a vendor zip.
+5. The row then turns **`InProgress`** and finally **`Available`** once `eda-asvr` has fetched it. Each row shows a ready‑to‑paste **NodeProfile** snippet — click **copy** to grab it, or **delete** to remove the image (which also drops `eda-asvr`'s hosted copy, and the md5 if there was one).
 
 Image names are unique — to replace an image, delete the old one first.
 
@@ -117,7 +118,7 @@ App behavior is controlled by a single cluster‑scoped resource, **`ImageManage
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `defaultArtifactNamespace` | `eda` | Namespace new Artifacts are created in (pre‑fills the upload form). |
+| `defaultArtifactNamespace` | `eda` | _Deprecated / no longer applied._ The upload form now requires you to pick a namespace from a dropdown each time, so nothing is pre‑filled or defaulted. |
 | `defaultRepo` | `images` | The single artifact repo that all uploads are placed in (not shown in the upload form; `Artifact` requires a repo, so the app uses one fixed value). |
 | `maxUploadMiB` | `4096` | Reject uploads larger than this (MiB). |
 | `retentionDays` | `0` | After this many days, delete the app's local copy of an image once `eda-asvr` reports it `Available` (`0` = keep forever). |

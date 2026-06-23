@@ -204,6 +204,19 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .tf input:not(:placeholder-shown) ~ label { top:-8px; font-size:11.5px; }
   .tf input:focus ~ label { color:var(--accent); }
   .tf input:disabled ~ label { opacity:.55; }
+  /* outlined select (namespace) — label stays floated; native arrow replaced by a chevron */
+  .tf.select select { width:100%; padding:14px 38px 14px 13px; border:1px solid var(--line);
+    border-radius:8px; background:var(--input-bg); color:var(--fg); font:14px inherit;
+    appearance:none; -webkit-appearance:none; cursor:pointer;
+    transition:border-color .15s, box-shadow .15s; }
+  .tf.select select:focus { outline:none; border-color:var(--accent); box-shadow:inset 0 0 0 1px var(--accent); }
+  .tf.select select:required:invalid { color:var(--muted); }
+  .tf.select select option { color:var(--fg); }
+  .tf.select label { top:-8px; font-size:11.5px; }
+  .tf.select select:focus ~ label { color:var(--accent); }
+  .tf.select::after { content:""; position:absolute; right:15px; top:21px; width:8px; height:8px;
+    border-right:2px solid var(--muted); border-bottom:2px solid var(--muted);
+    transform:rotate(45deg); pointer-events:none; }
   .helper { margin:6px 4px 0; font-size:11.5px; color:var(--muted); line-height:1.45; }
 
   .filefield { margin-top:6px; }
@@ -259,7 +272,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <div class="grow"></div>
     <button class="btn contained ripple" id="openUpload">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-      Upload image
+      Upload Image From File
     </button>
   </div>
 
@@ -301,11 +314,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
       <div class="helper" id="md5Note"></div>
     </div>
 
-    <div class="tf">
-      <input type="text" id="namespace" list="nslist" placeholder=" " autocomplete="off">
+    <div class="tf select">
+      <select id="namespace" required>
+        <option value="" disabled selected>Select a namespace&hellip;</option>
+      </select>
       <label for="namespace">Namespace</label>
-      <datalist id="nslist"></datalist>
-      <div class="helper">Suggestions are EDA user namespaces; you can type any namespace.</div>
+      <div class="helper">Choose the EDA namespace where the Artifact will be created.</div>
     </div>
 
     <div class="tf">
@@ -424,7 +438,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
   // ---------- config + namespaces ----------
   fetch(api("/api/config")).then(function(r){return r.json();}).then(function(c){
-    if(c.defaultArtifactNamespace){ ns.placeholder=" "; ns.value=ns.value||c.defaultArtifactNamespace; }
+    // No default namespace: the user must pick one from the dropdown.
     if(c.maxUploadMiB) maxBytes=c.maxUploadMiB*1024*1024;
     binHint.textContent="Maximum upload size: "+c.maxUploadMiB+" MiB.";
     if(c.user){
@@ -435,8 +449,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
   }).catch(function(){});
 
   fetch(api("/api/namespaces")).then(function(r){return r.json();}).then(function(d){
-    var dl=el("nslist"); (d.namespaces||[]).forEach(function(n){
-      var o=document.createElement("option"); o.value=n; dl.appendChild(o);
+    (d.namespaces||[]).forEach(function(n){
+      var o=document.createElement("option"); o.value=n; o.textContent=n; ns.appendChild(o);
     });
   }).catch(function(){});
 
@@ -457,7 +471,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   // ---------- upload (closes dialog; progress shown as a live table row) ----------
   function resetUploadForm(){
     binFile.value=""; md5Hash.value=""; md5Hash.disabled=false;
-    md5Note.textContent=MD5_DEFAULT_NOTE; imageName.value="";
+    md5Note.textContent=MD5_DEFAULT_NOTE; imageName.value=""; ns.selectedIndex=0;
     binHint.textContent="Maximum upload size: "+Math.round(maxBytes/1048576)+" MiB.";
   }
   function paintPendingCell(p){
@@ -470,8 +484,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
     // Validate first; on failure keep the dialog open so the user can fix it.
     if(!f){ snack("err","Select a .bin or .zip file first."); return; }
     if(f.size>maxBytes){ snack("err","File is "+fmtBytes(f.size)+", over the "+fmtBytes(maxBytes)+" limit."); return; }
+    var namespace=(ns.value||"").trim();
+    if(!namespace){ snack("err","Choose a namespace first."); return; }
     var zip=isZip(f.name);
-    var namespace=(ns.value||ns.placeholder||"").trim()||"eda";
     var name=(imageName.value||deriveName(f.name)).trim();
     var qs=new URLSearchParams({ filename:f.name, namespace:namespace, name:name });
     var mh=(md5Hash.value||"").trim().toLowerCase();
@@ -627,7 +642,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
       if(!seen[p.displayName+"|"+p.namespace]) pend.push(p);  // hide once the real artifact appears
     });
     if(!(pend.length+serverRows.length)){
-      rows.innerHTML='<tr><td colspan="6" class="empty">No images yet. Click <b>Upload image</b> to add one.</td></tr>';
+      rows.innerHTML='<tr><td colspan="6" class="empty">No images yet. Click <b>Upload Image From File</b> to add one.</td></tr>';
       el("refreshNote").style.display="none"; return;
     }
     rows.innerHTML = pend.map(pendingRowHtml).join("") + serverRows.map(serverRowHtml).join("");
