@@ -16,7 +16,7 @@ spec:
     or data lake; this app is a self-contained alternative for labs and PoCs
     where standing up that external store is unnecessary friction.
   author: EDACommunity
-  image: ghcr.io/kkayhan/edaapp_imagemanager/imagemanager-app:v26.4.2-4
+  image: ghcr.io/kkayhan/edaapp_imagemanager/imagemanager-app:v26.4.2-5
   supportedCoreVersions:
     - "v5.0.0-0"
   appInfo:
