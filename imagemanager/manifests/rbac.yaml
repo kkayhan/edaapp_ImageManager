@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: eda-imagemanager
+  namespace: eda-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: eda-imagemanager
+rules:
+  # Create/manage Artifact CRs (the integration point) in any namespace.
+  - apiGroups: ["artifacts.eda.nokia.com"]
+    resources: ["artifacts"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Read namespaces to populate the UI namespace picker (best-effort).
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list"]
+  # Create the per-namespace trust-bundle ConfigMap that eda-asvr uses to trust
+  # our internal-CA HTTPS file-serve endpoint when pulling artifacts.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "update", "patch"]
+  # Manage this app's own cluster-scoped config + write its status.
+  - apiGroups: ["imagemanager.eda.edacommunity.com"]
+    resources: ["imagemanagerconfigs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["imagemanager.eda.edacommunity.com"]
+    resources: ["imagemanagerconfigs/status"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: eda-imagemanager
+subjects:
+  - kind: ServiceAccount
+    name: eda-imagemanager
+    namespace: eda-system
+roleRef:
+  kind: ClusterRole
+  name: eda-imagemanager
+  apiGroup: rbac.authorization.k8s.io

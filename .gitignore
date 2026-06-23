@@ -1,0 +1,16 @@
+.venv
+.env
+.envrc
+
+.vscode
+*/build
+private
+
+# imagemanager/build/ holds hand-written controller source + Dockerfile (NOT generated
+# build artifacts), so keep it tracked despite the */build rule above.
+!imagemanager/build/
+!imagemanager/build/**
+
+# Python bytecode (e.g. from local test runs)
+__pycache__/
+*.pyc

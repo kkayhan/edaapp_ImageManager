@@ -1,0 +1,10 @@
+[project]
+name = "imagemanager"
+version = "0.1.0"
+description = "EDA App Development Project"
+readme = "README.md"
+requires-python = "~=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = ["ruff>=0.9.3"]

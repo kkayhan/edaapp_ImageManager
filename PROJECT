@@ -1,0 +1,5 @@
+builderVersion: v26.4.2
+domain: eda.edacommunity.com
+name: imagemanager
+registry: ghcr.io/kkayhan/edaapp_imagemanager
+vendor: edacommunity

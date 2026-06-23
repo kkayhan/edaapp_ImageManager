@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eda-imagemanager
+  namespace: eda-system
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      eda.nokia.com/app: eda-imagemanager
+  template:
+    metadata:
+      name: imagemanager
+      namespace: eda-system
+      labels:
+        eda.nokia.com/app: eda-imagemanager
+        eda.nokia.com/app-group: control-plane
+    spec:
+      serviceAccountName: eda-imagemanager
+      imagePullSecrets:
+        - name: ghcr-imagemanager
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        fsGroup: 65534
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: imagemanager-controller
+          image: ghcr.io/kkayhan/edaapp_imagemanager/imagemanager-controller:v26.4.2-1
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: serving
+              containerPort: 8443
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: serving
+              scheme: HTTPS
+            failureThreshold: 12
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: serving
+              scheme: HTTPS
+            periodSeconds: 30
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: serving
+              scheme: HTTPS
+            periodSeconds: 10
+          volumeMounts:
+            - name: upload-data
+              mountPath: /data
+            - name: serving-cert
+              mountPath: /var/run/eda/tls/serving
+              readOnly: true
+          resources:
+            limits:
+              cpu: "500m" # app-set: ${controllerCpuLimit}
+              memory: "256Mi" # app-set: ${controllerMemoryLimit}
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+      volumes:
+        - name: upload-data
+          persistentVolumeClaim:
+            claimName: imagemanager-data
+        - name: serving-cert
+          csi:
+            driver: csi.cert-manager.io
+            readOnly: true
+            volumeAttributes:
+              csi.cert-manager.io/issuer-name: eda-internal-issuer
+              csi.cert-manager.io/dns-names: "eda-imagemanager.${POD_NAMESPACE}.svc,eda-imagemanager.${POD_NAMESPACE}.svc.cluster.local,eda-imagemanager"
+              csi.cert-manager.io/key-algorithm: ECDSA
+              csi.cert-manager.io/duration: 720h0m0s
+              csi.cert-manager.io/renew-before: 240h0m0s

@@ -1,0 +1,155 @@
+{
+  "description": "ImageManagerConfig is the Schema for the imagemanagerconfigs API",
+  "type": "object",
+  "properties": {
+    "apiVersion": {
+      "description": "APIVersion defines the versioned schema of this representation of an object.\nServers should convert recognized schemas to the latest internal value, and\nmay reject unrecognized values.\nMore info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+      "type": "string"
+    },
+    "kind": {
+      "description": "Kind is a string value representing the REST resource this object represents.\nServers may infer this from the endpoint the client submits requests to.\nCannot be updated.\nIn CamelCase.\nMore info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+      "type": "string"
+    },
+    "metadata": {
+      "type": "object"
+    },
+    "spec": {
+      "description": "ImageManagerConfigSpec defines the desired state of ImageManagerConfig.\nA single cluster-scoped instance named \"default\" is auto-created by the\ncontroller on first boot and holds operator-tunable defaults for the\nupload UI and the Artifact CRs it creates.",
+      "type": "object",
+      "title": "Specification",
+      "properties": {
+        "defaultArtifactNamespace": {
+          "description": "DefaultArtifactNamespace is the namespace where new Artifact CRs are\ncreated when the upload form does not specify one. The built-in EDA\nartifact server (eda-asvr) re-hosts the file under this namespace.",
+          "type": "string",
+          "title": "Default artifact namespace",
+          "default": "eda",
+          "x-eda-nokia-com": {
+            "ui-order-priority": 100
+          }
+        },
+        "defaultRepo": {
+          "description": "DefaultRepo is the artifact repo name pre-filled in the upload UI.\nThe repo field on an Artifact is IMMUTABLE once created; multiple\nartifacts may share a repo.",
+          "type": "string",
+          "title": "Default repo",
+          "default": "images",
+          "x-eda-nokia-com": {
+            "ui-order-priority": 200
+          }
+        },
+        "filePullBaseUrl": {
+          "description": "FilePullBaseUrl is the in-cluster HTTPS base URL that eda-asvr uses to\npull uploaded files from this app. Leave empty to auto-derive\nhttps://eda-imagemanager.\u003cpod-namespace\u003e.svc:8443/ . Override only for\nnon-standard service names or ports.",
+          "type": "string",
+          "title": "File-pull base URL (advanced)",
+          "pattern": "^(https?://.*)?$",
+          "x-eda-nokia-com": {
+            "ui-order-priority": 400
+          }
+        },
+        "maxUploadMiB": {
+          "description": "MaxUploadMiB rejects direct uploads larger than this many MiB, in both\nthe browser and the server. Guards the PVC and surfaces any HTTP-proxy\nbody-size limit early.",
+          "type": "integer",
+          "title": "Max upload size (MiB)",
+          "default": 4096,
+          "maximum": 65536,
+          "minimum": 1,
+          "x-eda-nokia-com": {
+            "ui-order-priority": 300
+          }
+        },
+        "retentionDays": {
+          "description": "RetentionDays purges the PVC-stored copy of an upload this many days\nafter its Artifact reports Available (eda-asvr has re-hosted it, so the\nlocal copy is redundant). 0 keeps local copies forever.",
+          "type": "integer",
+          "title": "Local copy retention (days)",
+          "default": 0,
+          "minimum": 0,
+          "x-eda-nokia-com": {
+            "ui-order-priority": 500
+          }
+        }
+      },
+      "x-eda-nokia-com": {
+        "ui-order-priority": 30
+      }
+    },
+    "status": {
+      "description": "ImageManagerConfigStatus defines the observed state of ImageManagerConfig.\nThe controller is the sole writer of this status.",
+      "type": "object",
+      "title": "Status",
+      "properties": {
+        "artifacts": {
+          "description": "Artifacts is a denormalized view of the Artifact CRs this app created,\nwith each Artifact's live download status mirrored for the UI.",
+          "type": "array",
+          "items": {
+            "description": "TrackedArtifact is a denormalized record of one Artifact CR created by this\napp, including the live download status mirrored from the Artifact.",
+            "type": "object",
+            "required": [
+              "filePath",
+              "name",
+              "namespace",
+              "repo"
+            ],
+            "properties": {
+              "downloadStatus": {
+                "description": "DownloadStatus mirrors Artifact.status.downloadStatus\n(InProgress, Available, Error, or Failed).",
+                "type": "string"
+              },
+              "externalUrl": {
+                "description": "ExternalUrl mirrors Artifact.status.externalUrl once Available.",
+                "type": "string"
+              },
+              "filePath": {
+                "description": "FilePath is the destination path/filename in the artifact server.",
+                "type": "string"
+              },
+              "name": {
+                "description": "Name is the Artifact CR name (equals the upload id).",
+                "type": "string"
+              },
+              "namespace": {
+                "description": "Namespace is the Artifact CR namespace.",
+                "type": "string"
+              },
+              "repo": {
+                "description": "Repo is the artifact repo.",
+                "type": "string"
+              },
+              "statusReason": {
+                "description": "StatusReason mirrors Artifact.status.statusReason on Error/Failed.",
+                "type": "string"
+              }
+            }
+          }
+        },
+        "bytesStored": {
+          "description": "BytesStored is the total bytes of upload files on the PVC.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "health": {
+          "description": "Health is the overall health: ok, degraded, or error.",
+          "type": "string"
+        },
+        "lastReconcileTime": {
+          "description": "LastReconcileTime is the timestamp of the last completed reconcile cycle.",
+          "type": "string"
+        },
+        "message": {
+          "description": "Message is a human-readable explanation of the current health state.",
+          "type": "string"
+        },
+        "uploadsStored": {
+          "description": "UploadsStored is the number of upload files currently on the PVC.",
+          "type": "integer"
+        },
+        "version": {
+          "description": "Version is the controller version string.",
+          "type": "string"
+        }
+      },
+      "readOnly": true,
+      "x-eda-nokia-com": {
+        "ui-order-priority": 20
+      }
+    }
+  }
+}
