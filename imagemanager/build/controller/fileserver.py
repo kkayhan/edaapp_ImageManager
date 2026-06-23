@@ -25,7 +25,7 @@ import threading
 import urllib.error
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, quote, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
 
 import artifact
 import auth
@@ -273,7 +273,12 @@ class Handler(BaseHTTPRequestHandler):
         import k8s
         names = []
         try:
-            obj = k8s._request("GET", "/api/v1/namespaces")  # noqa: SLF001
+            # Suggest only EDA *user* namespaces (labelled eda.nokia.com/source,
+            # e.g. eda/demo) — not infrastructure namespaces (eda-system, kube-*,
+            # cert-manager, rook-ceph, vcluster-*, ...). The field is still free
+            # text, so a user can type any namespace manually.
+            q = urlencode({"labelSelector": "eda.nokia.com/source"})
+            obj = k8s._request("GET", "/api/v1/namespaces?" + q)  # noqa: SLF001
             names = sorted(
                 ns["metadata"]["name"] for ns in (obj or {}).get("items", [])
             )
