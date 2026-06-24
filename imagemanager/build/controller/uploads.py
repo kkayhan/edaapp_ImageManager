@@ -30,6 +30,8 @@ import logging
 import os
 import re
 import shutil
+import urllib.error
+import urllib.request
 import zipfile
 from datetime import datetime, timezone
 
@@ -41,6 +43,25 @@ _CHUNK = 1024 * 1024  # 1 MiB
 # "Nokia-7220_IXR_SR_Linux-<hw>-26.3.2.zip") and a semantic version in them.
 _SRLINUX_RE = re.compile(r"sr[ _-]?linux", re.I)
 _VERSION_RE = re.compile(r"(\d+\.\d+\.\d+(?:-\d+)?)")
+
+# ----------------------------- SR OS (7750 TiMOS) -----------------------------
+# A 7750 SR OS vendor zip unpacks to cflash/TiMOS-SR-<ver>/{both.tim,cpm.tim,...}.
+# EDA's NodeProfile.spec.images[] references each of these boot files as its OWN
+# Artifact (repo srosimages), so one upload -> several Artifacts. We extract the
+# canonical boot set; the combined both.tim plus the role images (cpm/iom) cover
+# both integrated and distributed 7750 chassis. SR OS images carry no per-file
+# md5 in the zip (only signatures.txt), and the reference NodeProfiles omit
+# imageMd5, so we host the files without an md5 sidecar.
+SROS_TIM_FILES = ["boot.ldr", "both.tim", "cpm.tim", "iom.tim", "kernel.tim", "support.tim"]
+# e.g. "cflash/TiMOS-SR-26.3.R3/both.tim" -> 26.3.R3
+_SROS_DIR_RE = re.compile(r"TiMOS-[A-Za-z]+-(\d+\.\d+\.[Rr]\d+)")
+
+# EDA SR OS schema profiles ("yang") are published as github release zip assets
+# named sros-<ver>.zip; the release tag is inconsistently prefixed, so try both.
+_SCHEMA_PROFILE_URLS = [
+    "https://github.com/nokia-eda/schema-profiles/releases/download/nokia-sros-v{v}/sros-{v}.zip",
+    "https://github.com/nokia-eda/schema-profiles/releases/download/nokia-sros-{v}/sros-{v}.zip",
+]
 
 
 class UploadTooLarge(Exception):
@@ -141,6 +162,103 @@ def extract_image_from_zip(zip_path, dest_dir):
     return bin_filename, md5
 
 
+def detect_sros_version(member_names):
+    """Return the SR OS version string (e.g. '26.3.R3') discovered in a TiMOS
+    zip's member paths (the cflash/TiMOS-SR-<ver>/ directory), or None."""
+    for n in member_names:
+        m = _SROS_DIR_RE.search(n or "")
+        if m:
+            return m.group(1)
+    return None
+
+
+def extract_sros_images(zip_path, dest_dir):
+    """Extract the SR OS boot image set from a 7750 TiMOS vendor zip.
+
+    Streams each target file (both.tim, cpm.tim, iom.tim, kernel.tim,
+    support.tim, boot.ldr) out of the cflash/TiMOS-SR-<ver>/ directory, then
+    removes the zip. Returns (version_display, [{'filename':.., 'size':..}, ..]).
+    Raises BadZip if the archive is unreadable or is not a 7750 TiMOS image.
+    """
+    try:
+        zf = zipfile.ZipFile(zip_path)
+    except (zipfile.BadZipFile, OSError) as e:
+        raise BadZip("not a readable zip archive (%s)" % e)
+    extracted = []
+    with zf:
+        members = [m for m in zf.infolist() if not m.is_dir()]
+        version = detect_sros_version([m.filename for m in members])
+        if not version:
+            raise BadZip("not an SR OS TiMOS image (no TiMOS-SR-<version>/ directory)")
+        # Pin to the canonical image directory so we don't pick up the duplicate
+        # boot.ldr that also sits at the cflash/ root.
+        verdir = None
+        for m in members:
+            mm = _SROS_DIR_RE.search(m.filename)
+            if mm and mm.group(1) == version:
+                end = m.filename.find(mm.group(0)) + len(mm.group(0))
+                verdir = m.filename[:end] + "/"
+                break
+        wanted = set(SROS_TIM_FILES)
+        by_base = {}
+        for m in members:
+            if verdir and not m.filename.startswith(verdir):
+                continue
+            base = os.path.basename(m.filename)
+            if base in wanted and (base not in by_base or m.file_size > by_base[base].file_size):
+                by_base[base] = m
+        if "both.tim" not in by_base:
+            raise BadZip("not a 7750 SR OS image (both.tim not found)")
+        for base in SROS_TIM_FILES:
+            m = by_base.get(base)
+            if not m:
+                continue
+            safe = sanitize_filename(base)
+            out_path = os.path.join(dest_dir, safe)
+            with zf.open(m, "r") as src, open(out_path, "wb") as out:
+                shutil.copyfileobj(src, out, _CHUNK)
+            extracted.append({"filename": safe, "size": m.file_size})
+    try:
+        os.remove(zip_path)
+    except OSError:
+        pass
+    logger.info("Extracted %d SR OS image file(s) for version %s", len(extracted), version)
+    return version, extracted
+
+
+def schema_profile_filename(version_norm):
+    """The EDA schema-profile asset name for an SR OS version (e.g. sros-26.3.r3.zip)."""
+    return "sros-%s.zip" % version_norm
+
+
+def download_schema_profile(version_norm, dest_dir):
+    """Best-effort fetch of the EDA SR OS schema profile (sros-<ver>.zip) from
+    github.com/nokia-eda/schema-profiles releases into dest_dir. Returns the
+    stored filename, or None if no matching upstream release exists / fetch fails
+    (e.g. a brand-new version not yet published). Never raises."""
+    fn = schema_profile_filename(version_norm)
+    out_path = os.path.join(dest_dir, fn)
+    for tmpl in _SCHEMA_PROFILE_URLS:
+        url = tmpl.format(v=version_norm)
+        try:
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=60) as resp, open(out_path, "wb") as out:
+                shutil.copyfileobj(resp, out, _CHUNK)
+            logger.info("Fetched schema profile %s from %s", fn, url)
+            return fn
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                logger.warning("schema profile fetch %s -> HTTP %s", url, e.code)
+        except Exception as e:  # noqa: BLE001 - best-effort, network/TLS/timeouts
+            logger.warning("schema profile fetch %s failed: %s", url, e)
+    try:
+        if os.path.exists(out_path):
+            os.remove(out_path)
+    except OSError:
+        pass
+    return None
+
+
 def stream_upload(rfile, content_length, dest_path, max_bytes):
     """
     Stream `content_length` bytes from rfile into dest_path in fixed-size chunks
@@ -191,6 +309,36 @@ def finalize_upload(upload_id, filename, md5, repo, file_path, namespace,
         json.dump(meta, f)
     os.replace(tmp, os.path.join(d, "meta.json"))
     return meta
+
+
+def rewrite_meta(group_id, meta):
+    """Atomically (re)write meta.json for an upload from a full dict."""
+    d = os.path.join(DATA_DIR, group_id)
+    tmp = os.path.join(d, "meta.json.tmp")
+    with open(tmp, "w") as f:
+        json.dump(meta, f)
+    os.replace(tmp, os.path.join(d, "meta.json"))
+    return meta
+
+
+def finalize_group(group_id, display_name, nos, namespace, repo,
+                   artifacts, yang, size_bytes, version):
+    """Write meta.json for a multi-file image group (one upload -> many Artifacts,
+    e.g. SR OS). `artifacts` = [{artifactName, filename, filePath}, ...]; `yang`
+    = {artifactName, filename, filePath, repo} or None."""
+    meta = {
+        "uploadId": group_id,
+        "displayName": display_name,
+        "nos": nos,
+        "namespace": namespace,
+        "repo": repo,
+        "version": version,
+        "artifacts": artifacts,
+        "yang": yang or None,
+        "sizeBytes": size_bytes,
+        "storedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    return rewrite_meta(group_id, meta)
 
 
 def delete_upload(upload_id):

@@ -300,15 +300,32 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <div class="dialog" id="uploadDialog" role="dialog" aria-modal="true" aria-labelledby="dlgTitle">
   <h2 class="dialog-title" id="dlgTitle">Upload image</h2>
   <div class="dialog-body">
+    <div class="tf select">
+      <select id="imageType">
+        <option value="srl" selected>SR Linux &mdash; .bin or vendor .zip</option>
+        <option value="sros">SR OS &mdash; 7750 TiMOS .zip</option>
+      </select>
+      <label for="imageType">Image type</label>
+      <div class="helper" id="typeHint">SR Linux: upload the <span class="mono">.bin</span> or the vendor <span class="mono">.zip</span>.</div>
+    </div>
+
     <div class="filefield">
-      <span class="lbl">Image file &mdash; <span class="mono">.bin</span> or vendor <span class="mono">.zip</span> (required)</span>
+      <span class="lbl" id="binLbl">Image file &mdash; <span class="mono">.bin</span> or vendor <span class="mono">.zip</span> (required)</span>
       <div class="filebox">
         <input type="file" id="binFile" accept=".bin,.zip">
       </div>
       <div class="helper" id="binHint"></div>
     </div>
 
-    <div class="tf">
+    <div class="filefield" id="yangField" style="display:none">
+      <span class="lbl">YANG schema profile &mdash; <span class="mono">.zip</span> (optional)</span>
+      <div class="filebox">
+        <input type="file" id="yangFile" accept=".zip">
+      </div>
+      <div class="helper">Optional. If left empty it is auto-fetched from <span class="mono">nokia-eda/schema-profiles</span> for this version. Provide it for versions not yet published upstream.</div>
+    </div>
+
+    <div class="tf" id="md5Field">
       <input type="text" id="md5Hash" placeholder=" " maxlength="64" autocomplete="off">
       <label for="md5Hash">MD5 checksum (optional)</label>
       <div class="helper" id="md5Note"></div>
@@ -319,13 +336,13 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <option value="" disabled selected>Select a namespace&hellip;</option>
       </select>
       <label for="namespace">Namespace</label>
-      <div class="helper">Choose the EDA namespace where the Artifact will be created.</div>
+      <div class="helper">Choose the EDA namespace where the Artifact(s) will be created.</div>
     </div>
 
     <div class="tf">
       <input type="text" id="imageName" placeholder=" " autocomplete="off">
       <label for="imageName">Image name (artifact name + URL)</label>
-      <div class="helper">SR Linux images are auto-named <span class="mono">SRLinux-&lt;version&gt;</span>; edit if needed.</div>
+      <div class="helper" id="nameHint">SR Linux images are auto-named <span class="mono">SRLinux-&lt;version&gt;</span>; edit if needed.</div>
     </div>
   </div>
   <div class="dialog-actions">
@@ -361,7 +378,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
   var el = function(id){ return document.getElementById(id); };
   var binFile=el("binFile"), md5Hash=el("md5Hash"), md5Note=el("md5Note"),
       ns=el("namespace"), imageName=el("imageName"), btn=el("uploadBtn"),
-      binHint=el("binHint"), rows=el("rows");
+      binHint=el("binHint"), rows=el("rows"), imageType=el("imageType"),
+      yangFile=el("yangFile");
   md5Note.textContent = MD5_DEFAULT_NOTE;
   var signout=el("signoutLink"); if(signout) signout.href=apiBase+"/oauth/logout";
 
@@ -398,6 +416,31 @@ INDEX_HTML = r"""<!DOCTYPE html>
     }
     return stem||"image";
   }
+  function deriveSrosName(fn){
+    var m=(fn||"").match(/(\d+\.\d+\.[Rr]\d+)/);   // e.g. 26.3.R3
+    return m ? ("SROS-"+m[1]) : "SROS-image";
+  }
+  // Toggle the form between SR Linux and SR OS (7750 TiMOS) modes.
+  function applyType(){
+    var sros = imageType.value==="sros";
+    el("yangField").style.display = sros ? "" : "none";
+    el("md5Field").style.display  = sros ? "none" : "";
+    binFile.setAttribute("accept", sros ? ".zip" : ".bin,.zip");
+    el("binLbl").innerHTML = sros
+      ? 'Image file &mdash; 7750 <span class="mono">TiMOS .zip</span> (required)'
+      : 'Image file &mdash; <span class="mono">.bin</span> or vendor <span class="mono">.zip</span> (required)';
+    el("typeHint").innerHTML = sros
+      ? 'SR OS: upload the 7750 <span class="mono">TiMOS .zip</span>. Its boot files become separate Artifacts in <span class="mono">srosimages</span>.'
+      : 'SR Linux: upload the <span class="mono">.bin</span> or the vendor <span class="mono">.zip</span>.';
+    el("nameHint").innerHTML = sros
+      ? 'Auto-named <span class="mono">SROS-&lt;version&gt;</span> from the image (not editable).'
+      : 'SR Linux images are auto-named <span class="mono">SRLinux-&lt;version&gt;</span>; edit if needed.';
+    imageName.readOnly = sros;
+    imageName.value=""; binFile.value=""; if(yangFile) yangFile.value="";
+    md5Hash.value=""; md5Hash.disabled=false; md5Note.textContent=MD5_DEFAULT_NOTE;
+    binHint.textContent="Maximum upload size: "+Math.round(maxBytes/1048576)+" MiB.";
+  }
+  imageType.addEventListener("change", applyType);
 
   // ---------- snackbar ----------
   var snackbar=el("snackbar"), snackText=el("snackText"), snackTimer=null;
@@ -458,8 +501,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
   binFile.addEventListener("change", function(){
     var f=binFile.files[0];
     if(!f) return;
-    imageName.value=deriveName(f.name);
+    var sros = imageType.value==="sros";
+    imageName.value = sros ? deriveSrosName(f.name) : deriveName(f.name);
     binHint.textContent=f.name+"  ·  "+fmtBytes(f.size);
+    if(sros) return;   // SR OS has no md5 field
     var zip=isZip(f.name);
     md5Hash.disabled=zip;
     if(zip) md5Hash.value="";
@@ -470,39 +515,19 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
   // ---------- upload (closes dialog; progress shown as a live table row) ----------
   function resetUploadForm(){
-    binFile.value=""; md5Hash.value=""; md5Hash.disabled=false;
-    md5Note.textContent=MD5_DEFAULT_NOTE; imageName.value=""; ns.selectedIndex=0;
-    binHint.textContent="Maximum upload size: "+Math.round(maxBytes/1048576)+" MiB.";
+    imageType.value="srl";
+    ns.selectedIndex=0;
+    applyType();   // clears file/md5/name + restores SR Linux field visibility/hints
   }
   function paintPendingCell(p){
     var c=document.getElementById("upstat-"+p.key);
     if(c) c.innerHTML=pendStatusHtml(p); else render();
   }
 
-  btn.addEventListener("click", function(){
-    var f=binFile.files[0];
-    // Validate first; on failure keep the dialog open so the user can fix it.
-    if(!f){ snack("err","Select a .bin or .zip file first."); return; }
-    if(f.size>maxBytes){ snack("err","File is "+fmtBytes(f.size)+", over the "+fmtBytes(maxBytes)+" limit."); return; }
-    var namespace=(ns.value||"").trim();
-    if(!namespace){ snack("err","Choose a namespace first."); return; }
-    var zip=isZip(f.name);
-    var name=(imageName.value||deriveName(f.name)).trim();
-    var qs=new URLSearchParams({ filename:f.name, namespace:namespace, name:name });
-    var mh=(md5Hash.value||"").trim().toLowerCase();
-    if(mh && !zip) qs.set("md5", mh);
-
-    // Create the live row, then close the dialog right away.
-    var key="u"+(++uploadSeq);
-    var p={ key:key, displayName:name, namespace:namespace, total:f.size, isZip:zip,
-            phase:"Uploading", loaded:0, pct:0, speed:0, elapsed:0 };
-    pendingUploads[key]=p;
-    closeModal();
-    resetUploadForm();
-    render();
-
+  // Shared XHR uploader: streams `file` to `url`, driving the live pending row `p`.
+  function sendUpload(url, file, p, handlers){
     var xhr=new XMLHttpRequest();
-    xhr.open("POST", api("/api/upload")+"?"+qs.toString());
+    xhr.open("POST", url);
     var startT=Date.now();
     xhr.upload.onprogress=function(e){
       if(!e.lengthComputable) return;
@@ -512,25 +537,87 @@ INDEX_HTML = r"""<!DOCTYPE html>
       p.speed=p.elapsed>0 ? (e.loaded/1048576/p.elapsed) : 0;
       paintPendingCell(p);
     };
-    // Body fully uploaded; the server is now extracting (zip) / creating the Artifact.
-    xhr.upload.onload=function(){ p.phase = p.isZip ? "Unzipping" : "Processing"; paintPendingCell(p); };
-    xhr.onload=function(){
-      var r={}; try{ r=JSON.parse(xhr.responseText);}catch(e){}
-      if(xhr.status>=200 && xhr.status<300 && r.ok){
-        var from = r.fromZip ? (" Extracted "+(r.filename||"image")+" from the zip.") : "";
-        var note = r.md5 ? (" The artifact server will verify it against MD5 "+r.md5+".") : "";
-        snack("ok","Uploaded "+(r.filename||name)+"."+from+" Artifact "+r.namespace+"/"+r.artifactName+" created."+note);
-        // Leave the pending row up until the real artifact appears; refresh() swaps it in.
-        refresh();
-      } else {
-        delete pendingUploads[key]; render();
-        snack("err", (r.error||("HTTP "+xhr.status)), true);
-        if(r.uploadId) refresh();
-      }
-    };
-    xhr.onerror=function(){ delete pendingUploads[key]; render();
-      snack("err","Network error during upload.", true); };
-    xhr.send(f);
+    xhr.upload.onload=function(){ if(handlers.onBodySent) handlers.onBodySent(); };
+    xhr.onload=function(){ var r={}; try{ r=JSON.parse(xhr.responseText);}catch(e){}
+      handlers.onDone(xhr.status, r); };
+    xhr.onerror=function(){ handlers.onError(); };
+    xhr.send(file);
+    return xhr;
+  }
+
+  function startSrlUpload(f, namespace){
+    var zip=isZip(f.name);
+    var name=(imageName.value||deriveName(f.name)).trim();
+    var qs=new URLSearchParams({ filename:f.name, namespace:namespace, name:name });
+    var mh=(md5Hash.value||"").trim().toLowerCase();
+    if(mh && !zip) qs.set("md5", mh);
+    var key="u"+(++uploadSeq);
+    var p={ key:key, displayName:name, namespace:namespace, total:f.size, isZip:zip,
+            phase:"Uploading", loaded:0, pct:0, speed:0, elapsed:0 };
+    pendingUploads[key]=p; closeModal(); resetUploadForm(); render();
+    sendUpload(api("/api/upload")+"?"+qs.toString(), f, p, {
+      onBodySent:function(){ p.phase = p.isZip ? "Unzipping" : "Processing"; paintPendingCell(p); },
+      onDone:function(status, r){
+        if(status>=200 && status<300 && r.ok){
+          var from = r.fromZip ? (" Extracted "+(r.filename||"image")+" from the zip.") : "";
+          var note = r.md5 ? (" The artifact server will verify it against MD5 "+r.md5+".") : "";
+          snack("ok","Uploaded "+(r.filename||name)+"."+from+" Artifact "+r.namespace+"/"+r.artifactName+" created."+note);
+          refresh();
+        } else { delete pendingUploads[key]; render();
+          snack("err",(r.error||("HTTP "+status)), true); if(r.uploadId) refresh(); }
+      },
+      onError:function(){ delete pendingUploads[key]; render();
+        snack("err","Network error during upload.", true); }
+    });
+  }
+
+  function startSrosUpload(f, namespace){
+    if(!isZip(f.name)){ snack("err","SR OS images must be the 7750 TiMOS .zip."); return; }
+    var yfile = yangFile && yangFile.files[0] ? yangFile.files[0] : null;
+    var name=(imageName.value||deriveSrosName(f.name)).trim();
+    var qs=new URLSearchParams({ filename:f.name, namespace:namespace, name:name, nostype:"sros" });
+    if(yfile) qs.set("yangProvided","1");
+    var key="u"+(++uploadSeq);
+    var p={ key:key, displayName:name, namespace:namespace, total:f.size, isZip:true,
+            phase:"Uploading", loaded:0, pct:0, speed:0, elapsed:0 };
+    pendingUploads[key]=p; closeModal(); resetUploadForm(); render();
+    sendUpload(api("/api/upload")+"?"+qs.toString(), f, p, {
+      onBodySent:function(){ p.phase="Unzipping"; paintPendingCell(p); },
+      onDone:function(status, r){
+        if(status>=200 && status<300 && r.ok){
+          // The authoritative group row now exists server-side; clear the pending
+          // row explicitly (don't rely on a displayName string match).
+          delete pendingUploads[key];
+          var msg="Uploaded "+(r.displayName||name)+" — "+(r.fileCount||0)+" image files. "+(r.note||"");
+          if(yfile && r.uploadId){
+            snack("ok", msg+" Uploading YANG schema profile…");
+            var yqs=new URLSearchParams({ part:"yang", name:r.uploadId, namespace:namespace, filename:yfile.name });
+            var yx=new XMLHttpRequest();
+            yx.open("POST", api("/api/upload")+"?"+yqs.toString());
+            yx.onload=function(){ var rr={}; try{ rr=JSON.parse(yx.responseText);}catch(e){}
+              if(yx.status>=200 && yx.status<300 && rr.ok) snack("ok","YANG schema profile attached to "+(r.displayName||name)+".");
+              else snack("err","Images uploaded, but YANG attach failed: "+((rr&&rr.error)||("HTTP "+yx.status)), true);
+              refresh(); };
+            yx.onerror=function(){ snack("err","Images uploaded, but the YANG upload hit a network error.", true); refresh(); };
+            yx.send(yfile);
+          } else { snack("ok", msg); refresh(); }
+        } else { delete pendingUploads[key]; render();
+          snack("err",(r.error||("HTTP "+status)), true); if(r.uploadId) refresh(); }
+      },
+      onError:function(){ delete pendingUploads[key]; render();
+        snack("err","Network error during upload.", true); }
+    });
+  }
+
+  btn.addEventListener("click", function(){
+    var sros = imageType.value==="sros";
+    var f=binFile.files[0];
+    // Validate first; on failure keep the dialog open so the user can fix it.
+    if(!f){ snack("err", sros ? "Select the 7750 TiMOS .zip first." : "Select a .bin or .zip file first."); return; }
+    if(f.size>maxBytes){ snack("err","File is "+fmtBytes(f.size)+", over the "+fmtBytes(maxBytes)+" limit."); return; }
+    var namespace=(ns.value||"").trim();
+    if(!namespace){ snack("err","Choose a namespace first."); return; }
+    if(sros) startSrosUpload(f, namespace); else startSrlUpload(f, namespace);
   });
 
   // ---------- artifacts table ----------
@@ -559,13 +646,14 @@ INDEX_HTML = r"""<!DOCTYPE html>
       '</td><td><span class="mono pending">— ready when Available</span></td><td></td></tr>';
   }
   function serverRowHtml(t){
-    var snip=t.imagePath?("images:\n  - image: "+t.imagePath+(t.md5Path?("\n    imageMd5: "+t.md5Path):"")):"";
+    var snip=t.snippet||"";
     var np=snip
       ?('<div class="snippet-cell"><button class="iconbtn ripple" data-act="copysnip" data-snip="'+esc(snip)+'">copy</button><pre class="snippet">'+esc(snip)+'</pre></div>')
       :'<span class="mono pending">— ready when Available</span>';
     var reason=t.statusReason?('<div class="reason">'+esc(t.statusReason)+'</div>'):'';
+    var fcount=(t.nos==="sros" && t.fileCount)?('<div class="upinfo">'+t.fileCount+' image files'+(t.yangStatus?' + yang':'')+'</div>'):'';
     var del='<button class="iconbtn del ripple" data-act="del" data-uid="'+esc(t.uploadId||"")+'" data-ns="'+esc(t.namespace||"")+'" data-name="'+esc(t.name||"")+'">delete</button>';
-    return '<tr><td class="mono namecell">'+esc(t.displayName||t.name)+'</td><td>'+esc(t.namespace)+
+    return '<tr><td class="mono namecell">'+esc(t.displayName||t.name)+fcount+'</td><td>'+esc(t.namespace)+
       '</td><td class="num">'+fmtBytes(t.sizeBytes)+'</td><td>'+chip(t.downloadStatus)+reason+
       '</td><td>'+np+'</td><td>'+del+'</td></tr>';
   }

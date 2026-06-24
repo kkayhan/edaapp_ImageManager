@@ -20,6 +20,12 @@ ARTIFACT_GROUP = "artifacts.eda.nokia.com"
 ARTIFACT_VERSION = "v1"
 ARTIFACT_PLURAL = "artifacts"
 
+# EDA repo conventions consumed by NodeProfiles. SR Linux uploads use the
+# config-driven defaultRepo ("images"); SR OS boot images and their YANG schema
+# profile go to the repos the reference SR OS NodeProfiles expect.
+SROS_REPO = "srosimages"
+SCHEMAPROFILE_REPO = "schemaprofiles"
+
 MANAGED_LABEL = "imagemanager.eda.edacommunity.com/managed"
 SERVICE_NAME = "eda-imagemanager"
 SERVICE_PORT = 8443

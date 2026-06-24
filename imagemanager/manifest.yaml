@@ -7,16 +7,19 @@ spec:
   version: v1alpha1
   title: EDA Image Manager
   description: |
-    A lab-friendly web UI to upload network OS images into EDA. You upload the
-    raw .bin (optionally with an .md5) or the vendor .zip; each upload is stored
-    in-cluster and an EDA Artifact CR is created automatically, so the built-in
-    artifact server (eda-asvr) downloads the file, validates it against the md5,
-    and re-hosts it for node bootstrap and image upgrades. EDA's artifact server
-    uses a pull model that integrates with an organization's central image store
-    or data lake; this app is a self-contained alternative for labs and PoCs
-    where standing up that external store is unnecessary friction.
+    A lab-friendly web UI to upload network OS images into EDA. You upload an
+    SR Linux .bin (optionally with an .md5) or vendor .zip, or a Nokia 7750 SR OS
+    (TiMOS) .zip; each upload is stored in-cluster and EDA Artifact CRs are
+    created automatically, so the built-in artifact server (eda-asvr) downloads
+    the file(s), validates them, and re-hosts them for node bootstrap and image
+    upgrades. SR OS images unpack into their boot-file set (both.tim, cpm.tim,
+    iom.tim, kernel.tim, support.tim, boot.ldr) -- one Artifact each in the
+    srosimages repo -- plus the matching YANG schema profile. EDA's artifact
+    server uses a pull model that integrates with an organization's central image
+    store or data lake; this app is a self-contained alternative for labs and
+    PoCs where standing up that external store is unnecessary friction.
   author: EDACommunity
-  image: ghcr.io/kkayhan/edaapp_imagemanager/imagemanager-app:v26.4.2-6
+  image: ghcr.io/kkayhan/edaapp_imagemanager/imagemanager-app:v26.4.2-7
   supportedCoreVersions:
     - "v5.0.0-0"
   appInfo:
