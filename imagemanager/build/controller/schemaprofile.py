@@ -26,13 +26,16 @@ import logging
 import os
 import re
 import tarfile
+import time
 import urllib.error
 import urllib.request
 import zipfile
 
 logger = logging.getLogger("schemaprofile")
 
-_TIMEOUT = 180
+_TIMEOUT = 60          # per-attempt; retries bound the total
+_ATTEMPTS = 3          # ride out a transient GitHub hiccup
+_BACKOFF = 2           # seconds; grows 2s, 4s between attempts
 _UA = "eda-imagemanager"
 _RELEASES_API = "https://api.github.com/repos/nokia-eda/schema-profiles/releases?per_page=100"
 _X50_TARBALL = "https://codeload.github.com/nokia/7x50_YangModels/tar.gz/refs/tags/sros_{ver}"
@@ -115,9 +118,26 @@ def sros_version_match(version):
 
 
 def _http_get(url, accept="application/octet-stream"):
-    req = urllib.request.Request(url, headers={"User-Agent": _UA, "Accept": accept})
-    with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:
-        return r.read()
+    """GET with up to _ATTEMPTS tries to ride out a transient GitHub hiccup.
+    Retries network errors / timeouts / HTTP 5xx / 429; fails fast on other 4xx
+    (e.g. 404 = unpublished version or missing 7x50 tag — retrying won't help).
+    Raises the last error after exhausting attempts (callers treat that as None)."""
+    last = None
+    for i in range(_ATTEMPTS):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": _UA, "Accept": accept})
+            with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:
+                return r.read()
+        except urllib.error.HTTPError as e:
+            last = e
+            if e.code != 429 and e.code < 500:
+                raise  # permanent 4xx (404/403/...): don't retry
+        except Exception as e:  # noqa: BLE001 - URLError/timeout/socket/TLS: transient
+            last = e
+        if i < _ATTEMPTS - 1:
+            logger.info("GitHub GET %s failed (%s); retry %d/%d", url, last, i + 1, _ATTEMPTS - 1)
+            time.sleep(_BACKOFF * (i + 1))
+    raise last
 
 
 def fetch_published_profile(nos, version, dest_dir):
