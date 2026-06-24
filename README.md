@@ -3,7 +3,9 @@
 A Nokia EDA application that lets you **upload network OS images through a web page** and turns each upload into proper EDA **Artifact(s)** automatically, ready for Zero‑Touch Provisioning (ZTP) and software upgrades. It supports:
 
 - **SR Linux** — the raw `.bin` (optionally with an MD5 hash) or the **vendor `.zip`** (the `.bin` and its `.md5` are extracted for you) → one Artifact in the `images` repo.
-- **SR OS — Nokia 7750 (TiMOS)** — the vendor **`.zip`**. The app extracts the boot‑image set (`both.tim`, `cpm.tim`, `iom.tim`, `kernel.tim`, `support.tim`, `boot.ldr`) and creates **one Artifact per file** in the `srosimages` repo, plus the matching **YANG schema profile** (auto‑fetched from `nokia-eda/schema-profiles`, or uploaded by you) in the `schemaprofiles` repo.
+- **SR OS — Nokia 7750 (TiMOS)** — the vendor **`.zip`**. The app extracts the boot‑image set (`both.tim`, `cpm.tim`, `iom.tim`, `kernel.tim`, `support.tim`, `boot.ldr`) and creates **one Artifact per file** in the `srosimages` repo.
+
+For both NOS the matching **YANG schema profile** (the NodeProfile `yang:`) is obtained automatically and hosted in the `schemaprofiles` repo — so you don't have to upload it. It's fetched from `nokia-eda/schema-profiles` when published; for SR OS versions not yet published there, it's **built on the fly from `nokia/7x50_YangModels`** (byte‑identical to the official profile). You can still attach your own `.zip`, which takes priority.
 
 ---
 
@@ -88,7 +90,8 @@ Click **Upload Image From File** (top right) to open the upload dialog, then:
 1. **Pick the image type** — *SR Linux* (`.bin` / vendor `.zip`) or *SR OS — 7750 (TiMOS `.zip`)*.
 2. **Pick the image file.**
    - **SR Linux:** the raw `.bin`, or the **vendor `.zip`** (e.g. `Nokia-7220_IXR_SR_Linux-<hw>-26.3.2.zip`). For a zip, the app extracts the `.bin` and reads the packaged `.md5` automatically. The **Image name** auto‑fills as `SRLinux-<version>` — editable.
-   - **SR OS:** the 7750 **TiMOS `.zip`** (e.g. `Nokia-7750_SR-TiMOS-26.3.R3.zip`). The app extracts the boot‑image set and creates one Artifact per file. The name is fixed to `SROS-<version>` (read from the image). *Optionally* attach a **YANG schema profile `.zip`** — if you don't, it's auto‑fetched from `nokia-eda/schema-profiles` for that version (provide it for versions not yet published upstream).
+   - **SR OS:** the 7750 **TiMOS `.zip`** (e.g. `Nokia-7750_SR-TiMOS-26.3.R3.zip`). The app extracts the boot‑image set and creates one Artifact per file. The name is fixed to `SROS-<version>` (read from the image).
+   - *(Either NOS, optional)* attach a **YANG schema profile `.zip`** — if you don't, it's obtained automatically (fetched from `nokia-eda/schema-profiles`, or for unpublished SR OS versions built from `nokia/7x50_YangModels`). Your uploaded file always takes priority.
 3. **Choose the Namespace** — pick the target EDA namespace from the dropdown. There's no default; you must select one before uploading.
 4. *(SR Linux raw `.bin` only)* **Paste the vendor's MD5 hash** so EDA can verify the download. (Vendor zips use the packaged checksum; SR OS images carry no per‑file MD5, matching the reference NodeProfiles.)
 5. **Click Upload.** The dialog closes and the image appears in the table right away as **Uploading**, then **Un‑zipping**.

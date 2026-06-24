@@ -30,8 +30,6 @@ import logging
 import os
 import re
 import shutil
-import urllib.error
-import urllib.request
 import zipfile
 from datetime import datetime, timezone
 
@@ -55,13 +53,6 @@ _VERSION_RE = re.compile(r"(\d+\.\d+\.\d+(?:-\d+)?)")
 SROS_TIM_FILES = ["boot.ldr", "both.tim", "cpm.tim", "iom.tim", "kernel.tim", "support.tim"]
 # e.g. "cflash/TiMOS-SR-26.3.R3/both.tim" -> 26.3.R3
 _SROS_DIR_RE = re.compile(r"TiMOS-[A-Za-z]+-(\d+\.\d+\.[Rr]\d+)")
-
-# EDA SR OS schema profiles ("yang") are published as github release zip assets
-# named sros-<ver>.zip; the release tag is inconsistently prefixed, so try both.
-_SCHEMA_PROFILE_URLS = [
-    "https://github.com/nokia-eda/schema-profiles/releases/download/nokia-sros-v{v}/sros-{v}.zip",
-    "https://github.com/nokia-eda/schema-profiles/releases/download/nokia-sros-{v}/sros-{v}.zip",
-]
 
 
 class UploadTooLarge(Exception):
@@ -224,39 +215,6 @@ def extract_sros_images(zip_path, dest_dir):
         pass
     logger.info("Extracted %d SR OS image file(s) for version %s", len(extracted), version)
     return version, extracted
-
-
-def schema_profile_filename(version_norm):
-    """The EDA schema-profile asset name for an SR OS version (e.g. sros-26.3.r3.zip)."""
-    return "sros-%s.zip" % version_norm
-
-
-def download_schema_profile(version_norm, dest_dir):
-    """Best-effort fetch of the EDA SR OS schema profile (sros-<ver>.zip) from
-    github.com/nokia-eda/schema-profiles releases into dest_dir. Returns the
-    stored filename, or None if no matching upstream release exists / fetch fails
-    (e.g. a brand-new version not yet published). Never raises."""
-    fn = schema_profile_filename(version_norm)
-    out_path = os.path.join(dest_dir, fn)
-    for tmpl in _SCHEMA_PROFILE_URLS:
-        url = tmpl.format(v=version_norm)
-        try:
-            req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, timeout=60) as resp, open(out_path, "wb") as out:
-                shutil.copyfileobj(resp, out, _CHUNK)
-            logger.info("Fetched schema profile %s from %s", fn, url)
-            return fn
-        except urllib.error.HTTPError as e:
-            if e.code != 404:
-                logger.warning("schema profile fetch %s -> HTTP %s", url, e.code)
-        except Exception as e:  # noqa: BLE001 - best-effort, network/TLS/timeouts
-            logger.warning("schema profile fetch %s failed: %s", url, e)
-    try:
-        if os.path.exists(out_path):
-            os.remove(out_path)
-    except OSError:
-        pass
-    return None
 
 
 def stream_upload(rfile, content_length, dest_path, max_bytes):

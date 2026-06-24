@@ -320,12 +320,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
       <div class="helper" id="binHint"></div>
     </div>
 
-    <div class="filefield" id="yangField" style="display:none">
+    <div class="filefield" id="yangField">
       <span class="lbl">YANG schema profile &mdash; <span class="mono">.zip</span> (optional)</span>
       <div class="filebox">
         <input type="file" id="yangFile" accept=".zip">
       </div>
-      <div class="helper">Optional. If left empty it is auto-fetched from <span class="mono">nokia-eda/schema-profiles</span> for this version. Provide it for versions not yet published upstream.</div>
+      <div class="helper" id="yangHint">Optional. If left empty it is obtained automatically for this version.</div>
     </div>
 
     <div class="tf" id="md5Field">
@@ -445,7 +445,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
   // Toggle the form between SR Linux and SR OS (7750 TiMOS) modes.
   function applyType(){
     var sros = imageType.value==="sros";
-    el("yangField").style.display = sros ? "" : "none";
+    // The YANG schema profile is optional for BOTH NOS (auto-obtained otherwise).
+    el("yangField").style.display = "";
     el("md5Field").style.display  = sros ? "none" : "";
     binFile.setAttribute("accept", sros ? ".zip" : ".bin,.zip");
     el("binLbl").innerHTML = sros
@@ -457,6 +458,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
     el("nameHint").innerHTML = sros
       ? 'Auto-named <span class="mono">SROS-&lt;version&gt;</span> from the image (not editable).'
       : 'SR Linux images are auto-named <span class="mono">SRLinux-&lt;version&gt;</span>; edit if needed.';
+    el("yangHint").innerHTML = sros
+      ? 'Optional. If left empty it is auto-fetched from <span class="mono">nokia-eda/schema-profiles</span>, or built from <span class="mono">nokia/7x50_YangModels</span> for versions not published upstream.'
+      : 'Optional. If left empty it is auto-fetched from <span class="mono">nokia-eda/schema-profiles</span> for this version. Provide it for versions not published upstream.';
     imageName.readOnly = sros;
     imageName.value=""; binFile.value=""; if(yangFile) yangFile.value="";
     md5Hash.value=""; md5Hash.disabled=false; md5Note.textContent=MD5_DEFAULT_NOTE;
@@ -569,10 +573,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
   function startSrlUpload(f, namespace){
     var zip=isZip(f.name);
+    var yfile = yangFile && yangFile.files[0] ? yangFile.files[0] : null;
     var name=(imageName.value||deriveName(f.name)).trim();
     var qs=new URLSearchParams({ filename:f.name, namespace:namespace, name:name });
     var mh=(md5Hash.value||"").trim().toLowerCase();
     if(mh && !zip) qs.set("md5", mh);
+    if(yfile) qs.set("yangProvided","1");
     var key="u"+(++uploadSeq);
     var p={ key:key, displayName:name, namespace:namespace, total:f.size, isZip:zip,
             phase:"Uploading", loaded:0, pct:0, speed:0, elapsed:0 };
@@ -584,7 +590,17 @@ INDEX_HTML = r"""<!DOCTYPE html>
           var from = r.fromZip ? (" Extracted "+(r.filename||"image")+" from the zip.") : "";
           var note = r.md5 ? (" The artifact server will verify it against MD5 "+r.md5+".") : "";
           snack("ok","Uploaded "+(r.filename||name)+"."+from+" Artifact "+r.namespace+"/"+r.artifactName+" created."+note);
-          refresh();
+          if(yfile && r.uploadId){
+            var yqs=new URLSearchParams({ part:"yang", name:r.uploadId, namespace:namespace, filename:yfile.name });
+            var yx=new XMLHttpRequest();
+            yx.open("POST", api("/api/upload")+"?"+yqs.toString());
+            yx.onload=function(){ var rr={}; try{ rr=JSON.parse(yx.responseText);}catch(e){}
+              if(yx.status>=200 && yx.status<300 && rr.ok) snack("ok","YANG schema profile attached to "+(r.displayName||name)+".");
+              else snack("err","Image uploaded, but YANG attach failed: "+((rr&&rr.error)||("HTTP "+yx.status)), true);
+              refresh(); };
+            yx.onerror=function(){ snack("err","Image uploaded, but the YANG upload hit a network error.", true); refresh(); };
+            yx.send(yfile);
+          } else { refresh(); }
         } else { delete pendingUploads[key]; render();
           snack("err",(r.error||("HTTP "+status)), true); if(r.uploadId) refresh(); }
       },

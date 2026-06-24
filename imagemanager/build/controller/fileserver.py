@@ -32,6 +32,7 @@ from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
 
 import artifact
 import auth
+import schemaprofile
 import uploads
 import webui
 
@@ -390,7 +391,8 @@ class Handler(BaseHTTPRequestHandler):
                 names.append(yang["artifactName"])
         else:
             md5_name = (meta or {}).get("md5ArtifactName") or ""
-            names = [n for n in (name, md5_name) if n]
+            yang = (meta or {}).get("yang") or {}
+            names = [n for n in (name, md5_name, yang.get("artifactName")) if n]
         artifact_deleted = False
         if namespace:
             for art_name in names:
@@ -434,6 +436,9 @@ class Handler(BaseHTTPRequestHandler):
         display_name = (one("name") or "").strip() or uploads.derive_name(filename)
         artifact_name = uploads.to_k8s_name(display_name)
         provided_md5 = (one("md5") or "").strip().lower() or None
+        # If the user attached a YANG schema profile, a part=yang follow-up will
+        # supply it; skip the auto-fetch so the uploaded one wins.
+        yang_provided = (one("yangProvided") or "").lower() in ("1", "true", "yes")
         # A vendor .zip carries the trusted md5 inside it; ignore any typed md5.
         is_zip_name = filename.lower().endswith(".zip")
         if is_zip_name:
@@ -539,23 +544,46 @@ class Handler(BaseHTTPRequestHandler):
                 logger.warning("md5 Artifact %s/%s create failed (HTTP %s); imageMd5 path "
                                "unavailable", namespace, md5_artifact_name, e.code)
 
-        logger.info("Upload complete: %s (%d bytes, md5supplied=%s) -> Artifact %s/%s (name=%s)",
-                    filename, written, bool(provided_md5), namespace, artifact_name, display_name)
+        # YANG schema profile (best-effort, never aborts the image): a follow-up
+        # upload (yang_provided) wins; otherwise auto-fetch from nokia-eda/schema-profiles.
+        yang_created = False
+        if not yang_provided:
+            try:
+                vm = _VER_RE.search(display_name)
+                # the schema profile is per-release (X.Y.Z); drop any -<build> suffix
+                srl_ver = vm.group(1).split("-")[0] if vm else ""
+                if srl_ver:
+                    yfn, _src = schemaprofile.resolve_yang("srl", srl_ver, upload_dir)
+                    if yfn:
+                        ok, yrec = self._create_yang_artifact(namespace, artifact_name,
+                                                              artifact_name + "-yang", yfn, base_url)
+                        if ok:
+                            m = uploads.read_meta(artifact_name) or {}
+                            m["yang"] = yrec
+                            m["nos"] = "srl"
+                            m["version"] = srl_ver
+                            uploads.rewrite_meta(artifact_name, m)
+                            yang_created = True
+            except Exception as e:  # noqa: BLE001 - YANG is best-effort
+                logger.warning("SRL YANG handling failed for %s: %s", artifact_name, e)
+
+        logger.info("Upload complete: %s (%d bytes, md5supplied=%s, yang=%s) -> Artifact %s/%s (name=%s)",
+                    filename, written, bool(provided_md5), yang_created, namespace, artifact_name, display_name)
         self._send_json({"ok": True, "uploadId": artifact_name, "artifactName": artifact_name,
                          "displayName": display_name, "namespace": namespace, "repo": repo,
                          "filePath": display_name, "md5": provided_md5 or "", "sizeBytes": written,
-                         "fromZip": from_zip, "filename": filename})
+                         "fromZip": from_zip, "filename": filename,
+                         "yangProvided": yang_provided, "yangCreated": yang_created})
 
     # ---------------------- SR OS (7750 TiMOS) upload ----------------------
 
-    def _create_yang_artifact(self, namespace, group_id, version, yang_filename, base_url):
-        """Create the schema-profile (yang) Artifact for an SR OS group. The file
-        is hosted by us at /files/<group_id>/<yang_filename>. The Artifact is named
-        exactly group_id (sros-<ver>) so eda-asvr serves it at the reference path
-        <ns>/schemaprofiles/sros-<ver>/sros-<ver>.zip. Returns (ok, record); never
-        raises (a YANG failure must not abort the image upload)."""
-        yname = group_id
-        file_url, _ = artifact.file_urls(base_url, group_id, yang_filename)
+    def _create_yang_artifact(self, namespace, upload_id, yname, yang_filename, base_url):
+        """Create the schema-profile (yang) Artifact. The file is hosted by us at
+        /files/<upload_id>/<yang_filename>; the Artifact is named `yname` (SR OS:
+        the group id sros-<ver> -> reference path; SR Linux: <img>-yang to avoid
+        clashing with the image Artifact). Returns (ok, record); never raises (a
+        YANG failure must not abort the image upload)."""
+        file_url, _ = artifact.file_urls(base_url, upload_id, yang_filename)
         for attempt in range(4):
             try:
                 artifact.create_artifact(namespace, yname, artifact.SCHEMAPROFILE_REPO,
@@ -684,18 +712,20 @@ class Handler(BaseHTTPRequestHandler):
             if yang_provided:
                 note = "Awaiting YANG schema profile upload."
             else:
-                yfn = uploads.download_schema_profile(version, group_dir)
+                yfn, src = schemaprofile.resolve_yang("sros", version, group_dir)
                 if yfn:
-                    ok, yang_meta = self._create_yang_artifact(namespace, group_id, version,
+                    ok, yang_meta = self._create_yang_artifact(namespace, group_id, group_id,
                                                                yfn, base_url)
                     if ok:
                         total += os.path.getsize(os.path.join(group_dir, yfn))
-                        note = "YANG schema profile auto-fetched from nokia-eda/schema-profiles."
+                        note = ("YANG schema profile auto-fetched from nokia-eda/schema-profiles."
+                                if src == "published" else
+                                "YANG schema profile built from nokia/7x50_YangModels.")
                     else:
                         note = "Image artifacts created, but the YANG schema-profile Artifact failed."
                 else:
-                    note = (f"Image artifacts created. No upstream YANG schema profile for "
-                            f"{version}; upload one to complete onboarding.")
+                    note = (f"Image artifacts created. Could not obtain a YANG schema profile for "
+                            f"{version} (not published and no 7x50 tag); upload one to complete onboarding.")
         except Exception as e:  # noqa: BLE001 - YANG is best-effort; keep the image artifacts
             logger.warning("YANG handling failed for %s: %s", group_id, e)
             yang_meta = None
@@ -714,20 +744,29 @@ class Handler(BaseHTTPRequestHandler):
                          "note": note})
 
     def _handle_yang_upload(self, q):
+        """Attach a user-uploaded YANG schema profile to an existing image (SR OS
+        group OR SR Linux). The Artifact is named per NOS so it never clashes with
+        the image Artifact."""
         def one(name, default=None):
             v = q.get(name, [default])
             return v[0] if v else default
 
         namespace = (one("namespace") or "").strip()
-        group_id = uploads.to_k8s_name(one("name") or "")
-        meta = uploads.read_meta(group_id) if group_id else None
-        if not meta or meta.get("nos") != "sros":
-            self._send_json({"ok": False,
-                             "error": "unknown SR OS image group for YANG upload"}, 404)
+        upload_id = uploads.to_k8s_name(one("name") or "")
+        meta = uploads.read_meta(upload_id) if upload_id else None
+        if not meta:
+            self._send_json({"ok": False, "error": "unknown image for YANG upload"}, 404)
             return
+        nos = meta.get("nos") or "srl"
         namespace = namespace or meta.get("namespace")
-        version = meta.get("version") or group_id.replace("sros-", "", 1)
-        group_dir = os.path.join(UPLOAD_DIR, group_id)
+        version = meta.get("version") or ""
+        if not version:
+            mm = _VER_RE.search(meta.get("displayName") or upload_id)
+            version = mm.group(1) if mm else ""
+        if not version:
+            self._send_json({"ok": False, "error": "could not determine the image version"}, 400)
+            return
+        up_dir = os.path.join(UPLOAD_DIR, upload_id)
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
@@ -736,8 +775,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": "Content-Length required"}, 411)
             return
         max_bytes = int(CONFIG.get("maxUploadMiB", 4096)) * 1024 * 1024
-        yfn = uploads.schema_profile_filename(version)      # sros-<ver>.zip
-        dest = os.path.join(group_dir, yfn)
+        yfn = schemaprofile.schema_profile_filename(nos, version)   # sros-/srlinux-<ver>.zip
+        dest = os.path.join(up_dir, yfn)
         try:
             uploads.stream_upload(self.rfile, content_length, dest, max_bytes)
         except uploads.UploadTooLarge as e:
@@ -757,22 +796,23 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         base_url = CONFIG.get("filePullBaseUrl") or artifact.default_base_url(POD_NAMESPACE)
+        yname = upload_id if nos == "sros" else (upload_id + "-yang")
         old = meta.get("yang") or {}
         if old.get("artifactName"):
             try:
                 artifact.delete_artifact(namespace, old["artifactName"])
             except Exception:  # noqa: BLE001
                 pass
-        ok, yang_meta = self._create_yang_artifact(namespace, group_id, version, yfn, base_url)
+        ok, yang_meta = self._create_yang_artifact(namespace, upload_id, yname, yfn, base_url)
         if not ok:
             self._send_json({"ok": False, "error": "YANG schema-profile Artifact create failed"}, 502)
             return
         meta["yang"] = yang_meta
-        meta["sizeBytes"] = uploads.upload_dir_size(group_id)
-        uploads.rewrite_meta(group_id, meta)
-        logger.info("YANG schema profile attached to %s/%s", namespace, group_id)
-        self._send_json({"ok": True, "uploadId": group_id, "yangCreated": True,
-                         "displayName": meta.get("displayName") or group_id})
+        meta["sizeBytes"] = uploads.upload_dir_size(upload_id)
+        uploads.rewrite_meta(upload_id, meta)
+        logger.info("YANG schema profile attached to %s/%s (nos=%s)", namespace, upload_id, nos)
+        self._send_json({"ok": True, "uploadId": upload_id, "yangCreated": True,
+                         "displayName": meta.get("displayName") or upload_id})
 
 
 _VER_RE = re.compile(r"(\d+\.\d+\.[A-Za-z]?\d+(?:-\d+)?)")
@@ -841,16 +881,22 @@ def _single_row(m, status_by_key):
                 if md5_st.get("downloadStatus") == "Available" else "")
     display = m.get("displayName") or m.get("artifactName") or ""
     nos = m.get("nos") or "srl"
+    # optional YANG schema-profile artifact (auto-fetched or uploaded)
+    yang = m.get("yang") or {}
+    yst = status_by_key.get((ns, yang.get("artifactName")), {}) if yang.get("artifactName") else {}
+    yang_url = yst.get("internalUrl", "") if yst.get("downloadStatus") == "Available" else ""
     snippet = ""
     example = ""
     if image_path:
         snippet = "images:\n  - image: " + image_path
         if md5_path:
             snippet += "\n    imageMd5: " + md5_path
+        if yang_url:
+            snippet += "\nyang: " + yang_url
         vm = _VER_RE.search(display)
         example = _nodeprofile_yaml(nos, vm.group(1) if vm else "<version>", ns,
                                     uploads.to_k8s_name(display) or "my-nodeprofile",
-                                    [image_path], md5_path, "")
+                                    [image_path], md5_path, yang_url)
     return {
         "uploadId": m.get("uploadId"),
         "name": m.get("artifactName"),
@@ -869,6 +915,7 @@ def _single_row(m, status_by_key):
         "snippet": snippet,
         "nodeProfileExample": example,
         "nos": nos,
+        "yangStatus": (yst.get("downloadStatus") if yang.get("artifactName") else None),
     }
 
 
