@@ -26,7 +26,8 @@ don't need an external file server or hand‑written resources just to try a NOS
 ## Configuration
 
 Edit the cluster‑scoped `ImageManagerConfig` named `default` (GUI: **Image Manager → Config**):
-default artifact namespace (`eda`), default repo (`images`), max upload size (`4096` MiB),
-and local‑copy retention (`0` = keep forever).
+default artifact namespace (`eda`), default repo (`images`), and max upload size (`4096` MiB).
+The app keeps each uploaded file as the durable origin `eda-asvr` pulls from (it re‑pulls on
+restart), so files are never auto‑purged — they are removed only when you delete the Artifact.
 
 See the repository README for full details.

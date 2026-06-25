@@ -75,14 +75,6 @@ spec:
                 maximum: 65536
                 minimum: 1
                 type: integer
-              retentionDays:
-                default: 0
-                description: |-
-                  RetentionDays purges the PVC-stored copy of an upload this many days
-                  after its Artifact reports Available (eda-asvr has re-hosted it, so the
-                  local copy is redundant). 0 keeps local copies forever.
-                minimum: 0
-                type: integer
             type: object
           status:
             description: |-

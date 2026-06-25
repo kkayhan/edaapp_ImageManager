@@ -30,7 +30,7 @@ The application provides the following components:
 <div class="grid" markdown>
 <div markdown>
 
-* **ImageManagerConfig** — cluster‑scoped settings (default namespace/repo, max upload size, retention) and live status.
+* **ImageManagerConfig** — cluster‑scoped settings (default namespace/repo, max upload size) and live status.
 
 </div>
 </div>
