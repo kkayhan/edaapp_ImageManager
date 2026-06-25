@@ -2,10 +2,12 @@
 
 A Nokia EDA application that lets you **upload network OS images through a web page** and turns each upload into proper EDA **Artifact(s)** automatically, ready for Zero‑Touch Provisioning (ZTP) and software upgrades. It supports:
 
-- **SR Linux** — the raw `.bin` (optionally with an MD5 hash) or the **vendor `.zip`** (the `.bin` and its `.md5` are extracted for you) → one Artifact in the `images` repo.
-- **SR OS — Nokia 7750 (TiMOS)** — the vendor **`.zip`**. The app extracts the boot‑image set (`both.tim`, `cpm.tim`, `iom.tim`, `kernel.tim`, `support.tim`, `boot.ldr`) and creates **one Artifact per file** in the `srosimages` repo.
+- **SR Linux** — a vendor **`.zip`** (e.g. `Nokia-7220_IXR_SR_Linux-…-26.3.2.zip`). The app extracts the `.bin` and its packaged `.md5` and creates, in the `images` repo, an **image** Artifact **plus a separate `md5` Artifact** that the image references as its `imageMd5`.
+- **SR OS — Nokia 7750 (TiMOS)** — a vendor **`.zip`**. The app extracts the boot‑image set (`boot.ldr`, `both.tim`, `cpm.tim`, `iom.tim`, `kernel.tim`, `support.tim`) and creates, in the `srosimages` repo, **one image Artifact per file plus a matching `md5` Artifact for each** (the md5s come from the zip's `md5sums.txt`).
 
-For both NOS the matching **YANG schema profile** (the NodeProfile `yang:`) is obtained automatically and hosted in the `schemaprofiles` repo — so you don't have to upload it. It's fetched from `nokia-eda/schema-profiles` when published; for SR OS versions not yet published there, it's **built on the fly from `nokia/7x50_YangModels`** (byte‑identical to the official profile). You can still attach your own `.zip`, which takes priority.
+On top of those, the matching **YANG schema profile** (the NodeProfile `yang:`) is obtained automatically and hosted in the `schemaprofiles` repo — you don't upload it. It's fetched from `nokia-eda/schema-profiles` when published; for SR OS versions not yet published there, it's **built on the fly from `nokia/7x50_YangModels`** (byte‑identical to the official profile).
+
+So a single upload becomes **several** Artifacts — the image(s), their md5(s), and the YANG profile — all created, tracked, and deleted together.
 
 ---
 
@@ -15,16 +17,16 @@ EDA's built‑in **artifact server** (`eda-asvr`) hosts the files network elemen
 
 In a **lab or proof‑of‑concept**, though, you usually don't have that central store on hand — and standing one up just to try a NOS version (an external file server, plus a hand‑written `Artifact` resource per image) is friction you'd rather skip.
 
-**Image Manager is the lab‑friendly alternative.** It runs as a pod inside EDA and gives you a simple web page that stores the upload in‑cluster and creates the `Artifact` for you — no external file server, no YAML to author:
+**Image Manager is the lab‑friendly alternative.** It runs as a pod inside EDA and gives you a simple web page that stores the upload in‑cluster and creates the `Artifact`(s) for you — no external file server, no YAML to author:
 
 ```
 You (browser)                Image Manager pod              eda-asvr (built-in)
 ─────────────                ─────────────────              ───────────────────
- pick srl.bin or .zip (+ md5)
- ────────────────────────▶   store on PVC
-                             create an Artifact CR  ───────▶ download over HTTPS,
-                                                             verify MD5 (if given),
-                             ◀───────────────────────────── re‑host the file
+ pick a vendor .zip (SRL/SROS)
+ ────────────────────────▶   unzip + store on PVC
+                             create the Artifact CRs ──────▶ download over HTTPS,
+                                                             verify each MD5,
+                             ◀───────────────────────────── re‑host the file(s)
  status table → "Available"
  + NodeProfile snippet to copy
 ```
@@ -99,7 +101,7 @@ Image names are unique — to replace an image, delete the old one first.
 
 | Status | Meaning |
 |---|---|
-| `InProgress` | `eda-asvr` is downloading the image (and validating the MD5, if you supplied one). |
+| `InProgress` | `eda-asvr` is downloading the file(s) and validating each MD5. |
 | `Available` | Downloaded, validated, and re‑hosted — the row's NodeProfile snippet is ready to copy. |
 | `Failed` | `eda-asvr` rejected the image (for example, the MD5 doesn't match). The reason is shown in the row. |
 | `Error` | `eda-asvr` hit a problem fetching or processing the image. The reason is shown in the row. |
@@ -109,7 +111,7 @@ Image names are unique — to replace an image, delete the old one first.
 
 Once a row is `Available`, click **node profile** to open the popup. The **snippet** drops straight into an existing `NodeProfile`'s `spec.images`; the **complete example** is a ready‑to‑edit NodeProfile (the image paths/version/OS/`yang:` are filled in; `<…>` values like the management pool and DNS are yours to set). The paths are where `eda-asvr` serves the file(s).
 
-SR Linux (`imageMd5` appears only if you supplied an MD5):
+SR Linux (the `imageMd5` line comes from the `.md5` packaged in the zip):
 
 ```yaml
 images:
@@ -117,16 +119,22 @@ images:
     imageMd5: eda/images/srlinux-26.3.9-md5/srlinux-26.3.9-md5
 ```
 
-SR OS — every boot file is its own image entry, and the schema profile is the `yang:`:
+SR OS — every boot file is its own image entry (each with its `imageMd5`), and the schema profile is the `yang:`:
 
 ```yaml
 images:
   - image: eda/srosimages/sros-26.3.r3-boot.ldr/boot.ldr
+    imageMd5: eda/srosimages/sros-26.3.r3-boot.ldr-md5/boot.ldr.md5
   - image: eda/srosimages/sros-26.3.r3-both.tim/both.tim
+    imageMd5: eda/srosimages/sros-26.3.r3-both.tim-md5/both.tim.md5
   - image: eda/srosimages/sros-26.3.r3-cpm.tim/cpm.tim
+    imageMd5: eda/srosimages/sros-26.3.r3-cpm.tim-md5/cpm.tim.md5
   - image: eda/srosimages/sros-26.3.r3-iom.tim/iom.tim
+    imageMd5: eda/srosimages/sros-26.3.r3-iom.tim-md5/iom.tim.md5
   - image: eda/srosimages/sros-26.3.r3-kernel.tim/kernel.tim
+    imageMd5: eda/srosimages/sros-26.3.r3-kernel.tim-md5/kernel.tim.md5
   - image: eda/srosimages/sros-26.3.r3-support.tim/support.tim
+    imageMd5: eda/srosimages/sros-26.3.r3-support.tim-md5/support.tim.md5
 yang: https://eda-asvr.eda-system.svc/eda/schemaprofiles/sros-26.3.r3/sros-26.3.r3.zip
 ```
 
@@ -139,7 +147,7 @@ App behavior is controlled by a single cluster‑scoped resource, **`ImageManage
 | Setting | Default | Meaning |
 |---|---|---|
 | `defaultArtifactNamespace` | `eda` | _Deprecated / no longer applied._ The upload form now requires you to pick a namespace from a dropdown each time, so nothing is pre‑filled or defaulted. |
-| `defaultRepo` | `images` | The single artifact repo that all uploads are placed in (not shown in the upload form; `Artifact` requires a repo, so the app uses one fixed value). |
+| `defaultRepo` | `images` | The repo for **SR Linux** image and md5 Artifacts. (SR OS boot images always go to `srosimages` and YANG schema profiles to `schemaprofiles` — those are fixed; not shown in the upload form.) |
 | `maxUploadMiB` | `4096` | Reject uploads larger than this (MiB). |
 | `retentionDays` | `0` | After this many days, delete the app's local copy of an image once `eda-asvr` reports it `Available` (`0` = keep forever). |
 | `filePullBaseUrl` | _(auto)_ | Advanced: override the in‑cluster URL `eda-asvr` uses to pull from this app. |
@@ -156,7 +164,7 @@ Uninstall from the EDA Store (or remove the `AppInstaller`). This removes the co
 
 ## How it works under the hood
 
-- The controller is a small, dependency‑free Python 3 process. It talks only to the Kubernetes API using its pod ServiceAccount token (no Keycloak needed) to create `Artifact` CRs and report status.
+- The controller is a small, dependency‑free Python 3 process (standard library only). It creates `Artifact` CRs and reports status through the **Kubernetes API**, authenticating with its pod ServiceAccount token. The **web UI** is protected by **EDA single sign‑on** — an OIDC Authorization‑Code flow against EDA's Keycloak (reached in‑cluster via `eda-api`) — and is restricted to users holding an allowed EDA role (default `system-administrator`).
 - It serves its file‑pull endpoint over **HTTPS** using a certificate issued by EDA's internal CA (via the cert‑manager CSI driver). Because `eda-asvr`'s download client does **not** trust that CA by default, the controller also creates a small trust‑bundle ConfigMap in each target namespace and sets `spec.trustBundle` on every Artifact — so `eda-asvr` can pull from it securely with no manual setup.
 - The PersistentVolumeClaim is the source of truth for uploaded bytes; the `Artifact` resources are the source of truth for status.
 
