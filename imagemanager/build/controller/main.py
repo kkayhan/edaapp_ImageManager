@@ -6,15 +6,20 @@ Long-running controller that:
   * on upload, stores the file on the PVC and creates an Artifact CR pointing
     eda-asvr back at this app to pull + re-host the file,
   * reconciles every RECONCILE_INTERVAL: mirrors each Artifact's download status
-    into ImageManagerConfig.status for the UI, computes storage stats, and
-    (optionally) purges local copies once eda-asvr reports Available.
+    into ImageManagerConfig.status for the UI and computes storage stats.
 
-K8s-API only (pod ServiceAccount token). No Keycloak / EDA REST API.
+This app is the DURABLE origin eda-asvr pulls from: eda-asvr keeps no persistent
+store of its own (its re-hosted copy lives on ephemeral pod storage) and
+re-pulls from us whenever its pod restarts. So an uploaded file is retained for
+the life of its Artifact and is never auto-purged -- it is removed only when the
+user deletes the Artifact (see fileserver._handle_delete).
+
+Artifact/status operations use the Kubernetes API (pod ServiceAccount token);
+the web UI sign-in is handled separately in auth.py (EDA OIDC / Keycloak).
 """
 
 import logging
 import os
-import shutil
 import signal
 import threading
 import time
@@ -24,7 +29,7 @@ import fileserver
 import k8s
 import uploads
 
-VERSION = "v26.4.2-13"
+VERSION = "v26.4.2-14"
 UPLOAD_DIR = "/data/uploads"
 TLS_CRT = "/var/run/eda/tls/serving/tls.crt"
 PORT = 8443
@@ -41,7 +46,6 @@ DEFAULTS = {
     "defaultRepo": "images",
     "maxUploadMiB": 4096,
     "filePullBaseUrl": "",
-    "retentionDays": 0,
 }
 
 logger = logging.getLogger("main")
@@ -91,7 +95,6 @@ def _read_config():
         logger.warning("Failed to read %s/%s: %s", CRD_KIND, CRD_NAME, e)
     # clamp
     cfg["maxUploadMiB"] = max(1, min(65536, int(cfg["maxUploadMiB"])))
-    cfg["retentionDays"] = max(0, int(cfg["retentionDays"]))
     return cfg
 
 
@@ -109,35 +112,6 @@ def _ensure_default_cr():
         logger.info("Created default %s CR", CRD_KIND)
     except Exception as e:
         logger.warning("Failed to ensure default %s: %s", CRD_KIND, e)
-
-
-def _retention_sweep(tracked, retention_days):
-    """Delete the local PVC copy of uploads whose Artifact is Available and old."""
-    if retention_days <= 0:
-        return 0
-    now = datetime.now(timezone.utc)
-    deleted = 0
-    for t in tracked:
-        if t.get("downloadStatus") != "Available":
-            continue
-        stored = t.get("storedAt")
-        uid = t.get("uploadId")
-        if not stored or not uid:
-            continue
-        try:
-            dt = datetime.fromisoformat(stored)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            age_days = (now - dt).total_seconds() / 86400.0
-        except ValueError:
-            continue
-        if age_days > retention_days:
-            d = os.path.join(UPLOAD_DIR, uid)
-            shutil.rmtree(d, ignore_errors=True)
-            deleted += 1
-            logger.info("Retention: purged local copy of %s (age %.1fd, asvr hosts it)",
-                        uid, age_days)
-    return deleted
 
 
 def _update_status(health, message, tracked):
@@ -204,8 +178,6 @@ def main():
         except Exception as e:
             health, message = "degraded", f"reconcile error: {e}"
             logger.warning("Reconcile listing failed: %s", e)
-
-        _retention_sweep(tracked, cfg["retentionDays"])
 
         now_str = datetime.now(timezone.utc).isoformat(timespec="seconds")
         fileserver.write_healthz(health, now_str)

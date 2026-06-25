@@ -55,15 +55,6 @@ type ImageManagerConfigSpec struct {
 	// +eda:ui:title="File-pull base URL (advanced)"
 	// +eda:ui:orderpriority=400
 	FilePullBaseUrl string `json:"filePullBaseUrl,omitempty"`
-
-	// RetentionDays purges the PVC-stored copy of an upload this many days
-	// after its Artifact reports Available (eda-asvr has re-hosted it, so the
-	// local copy is redundant). 0 keeps local copies forever.
-	// +kubebuilder:default=0
-	// +kubebuilder:validation:Minimum=0
-	// +eda:ui:title="Local copy retention (days)"
-	// +eda:ui:orderpriority=500
-	RetentionDays int `json:"retentionDays,omitempty"`
 }
 
 // ImageManagerConfigStatus defines the observed state of ImageManagerConfig.

@@ -10,7 +10,6 @@ Y_DEFAULTARTIFACTNAMESPACE = 'defaultArtifactNamespace'
 Y_DEFAULTREPO = 'defaultRepo'
 Y_MAXUPLOADMIB = 'maxUploadMiB'
 Y_FILEPULLBASEURL = 'filePullBaseUrl'
-Y_RETENTIONDAYS = 'retentionDays'
 Y_HEALTH = 'health'
 Y_MESSAGE = 'message'
 Y_LASTRECONCILETIME = 'lastReconcileTime'
@@ -35,13 +34,11 @@ class ImageManagerConfigSpec:
         defaultRepo: str | None = None,
         maxUploadMiB: int | None = None,
         filePullBaseUrl: str | None = None,
-        retentionDays: int | None = None,
     ):
         self.defaultArtifactNamespace = defaultArtifactNamespace
         self.defaultRepo = defaultRepo
         self.maxUploadMiB = maxUploadMiB
         self.filePullBaseUrl = filePullBaseUrl
-        self.retentionDays = retentionDays
 
     def to_input(self):  # pragma: no cover
         _rval = {}
@@ -53,8 +50,6 @@ class ImageManagerConfigSpec:
             _rval[Y_MAXUPLOADMIB] = self.maxUploadMiB
         if self.filePullBaseUrl is not None:
             _rval[Y_FILEPULLBASEURL] = self.filePullBaseUrl
-        if self.retentionDays is not None:
-            _rval[Y_RETENTIONDAYS] = self.retentionDays
         return _rval
 
     @staticmethod
@@ -64,13 +59,11 @@ class ImageManagerConfigSpec:
             _defaultRepo = obj.get(Y_DEFAULTREPO, "images")
             _maxUploadMiB = obj.get(Y_MAXUPLOADMIB, 4096)
             _filePullBaseUrl = obj.get(Y_FILEPULLBASEURL)
-            _retentionDays = obj.get(Y_RETENTIONDAYS, 0)
             return ImageManagerConfigSpec(
                 defaultArtifactNamespace=_defaultArtifactNamespace,
                 defaultRepo=_defaultRepo,
                 maxUploadMiB=_maxUploadMiB,
                 filePullBaseUrl=_filePullBaseUrl,
-                retentionDays=_retentionDays,
             )
         return None  # pragma: no cover
 

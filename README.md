@@ -31,7 +31,9 @@ You (browser)                Image Manager pod              eda-asvr (built-in)
  + NodeProfile snippet to copy
 ```
 
-So in a lab you upload a file in the browser and, a few seconds later, it's a first‑class EDA artifact that nodes can pull — using the **same `eda-asvr` pull model EDA uses everywhere**, just with the staging and `Artifact` creation handled for you.
+So in a lab you upload a file in the browser and, a few seconds later, it's a first‑class EDA artifact that nodes can pull — using the **same `eda-asvr` pull model EDA uses everywhere**, just with the in‑cluster hosting and `Artifact` creation handled for you.
+
+> **The app keeps the file — on purpose.** `eda-asvr` does not store images permanently; it re‑hosts them by pulling from wherever the `Artifact` says they live, and in this app that source is the Image Manager pod itself. Its volume is therefore the **durable source of truth**, not a throwaway staging copy: `eda-asvr`'s own copy lives on ephemeral pod storage and it **re‑pulls from this app whenever its pod restarts** (during EDA upgrades, node drains, reschedules). That's why the app keeps your upload even after the artifact reports `Available` — and why deleting an image, or uninstalling the app, makes `eda-asvr` lose it. The two copies you see are *origin* (this app, durable) + *cache* (`eda-asvr`, disposable), not pointless duplication.
 
 ---
 
@@ -93,7 +95,7 @@ Click **Upload Image From File** (top right) to open the upload dialog, then:
 2. **Choose the Namespace** — pick the target EDA namespace from the dropdown. There's no default; you must select one before uploading.
 3. *(Optional)* edit the **auto‑generated name** (`srlinux-<version>` / `sros-<version>`). Names are always lowercase (the field lowercases as you type), so the Artifact name, the served path and the NodeProfile name are uniformly small letters.
 4. **Click Upload.** The dialog closes and the image appears in the table as **Uploading**, then **Un‑zipping**.
-5. The row turns **`InProgress`** and finally **`Available`** once `eda-asvr` has fetched every part. The list stays compact — **Name, Namespace, Size, Status** and actions. Click **node profile** on a row to open a popup with both the copy‑paste `spec.images` **snippet** (`image` + `imageMd5` per file, plus the `yang:` URL) and a **complete NodeProfile example**, or **delete** to remove the image and all its Artifacts (also dropping `eda-asvr`'s hosted copies).
+5. The row turns **`InProgress`** and finally **`Available`** once `eda-asvr` has fetched every part. The list stays compact — **Name, Namespace, Size, Status** and actions. Click **node profile** on a row to open a popup with both the copy‑paste `spec.images` **snippet** (`image` + `imageMd5` per file, plus the `yang:` URL) and a **complete NodeProfile example**, or **delete** to remove the image and all its Artifacts. **Delete asks you to confirm first** — a dialog spells out the consequences (the Artifacts are removed, `eda-asvr` stops hosting the image, and anything pointing at it — NodeProfiles, ZTP, upgrades — will fail until you re‑add a valid image, and the app's only copy is deleted) and only proceeds once you tick an acknowledgement.
 
 Image names are unique — to replace an image, delete the old one first.
 
@@ -149,7 +151,6 @@ App behavior is controlled by a single cluster‑scoped resource, **`ImageManage
 | `defaultArtifactNamespace` | `eda` | _Deprecated / no longer applied._ The upload form now requires you to pick a namespace from a dropdown each time, so nothing is pre‑filled or defaulted. |
 | `defaultRepo` | `images` | The repo for **SR Linux** image and md5 Artifacts. (SR OS boot images always go to `srosimages` and YANG schema profiles to `schemaprofiles` — those are fixed; not shown in the upload form.) |
 | `maxUploadMiB` | `4096` | Reject uploads larger than this (MiB). |
-| `retentionDays` | `0` | After this many days, delete the app's local copy of an image once `eda-asvr` reports it `Available` (`0` = keep forever). |
 | `filePullBaseUrl` | _(auto)_ | Advanced: override the in‑cluster URL `eda-asvr` uses to pull from this app. |
 
 Its **status** also reports overall health and a list of every artifact the app created, mirroring each one's live download status.
@@ -158,7 +159,7 @@ Its **status** also reports overall health and a list of every artifact the app 
 
 ## Uninstalling
 
-Uninstall from the EDA Store (or remove the `AppInstaller`). This removes the controller, its Service/proxy/RBAC, and **its PersistentVolumeClaim** — i.e. the app's local copies of uploaded files are deleted. Artifacts that `eda-asvr` already re‑hosted keep working, because `eda-asvr` stores its own copy. Treat the app's volume as a staging area, not permanent storage.
+Uninstall from the EDA Store (or remove the `AppInstaller`). This removes the controller, its Service/proxy/RBAC, and **its PersistentVolumeClaim** — i.e. the app's stored images are deleted. Because this app is the **durable origin** `eda-asvr` pulls from (see _What it's for_ above), uninstalling breaks every Artifact it created: `eda-asvr` keeps no permanent copy of its own and will fail to re‑pull the files the next time its pod restarts. Before uninstalling, move any images you still need into a permanent store and re‑point their Artifacts there.
 
 ---
 
@@ -166,7 +167,7 @@ Uninstall from the EDA Store (or remove the `AppInstaller`). This removes the co
 
 - The controller is a small, dependency‑free Python 3 process (standard library only). It creates `Artifact` CRs and reports status through the **Kubernetes API**, authenticating with its pod ServiceAccount token. The **web UI** is protected by **EDA single sign‑on** — an OIDC Authorization‑Code flow against EDA's Keycloak (reached in‑cluster via `eda-api`) — and is restricted to users holding an allowed EDA role (default `system-administrator`).
 - It serves its file‑pull endpoint over **HTTPS** using a certificate issued by EDA's internal CA (via the cert‑manager CSI driver). Because `eda-asvr`'s download client does **not** trust that CA by default, the controller also creates a small trust‑bundle ConfigMap in each target namespace and sets `spec.trustBundle` on every Artifact — so `eda-asvr` can pull from it securely with no manual setup.
-- The PersistentVolumeClaim is the source of truth for uploaded bytes; the `Artifact` resources are the source of truth for status.
+- The PersistentVolumeClaim is the **durable** source of truth for uploaded bytes — `eda-asvr` keeps no permanent store of its own and re‑pulls from this app on restart, so the files are retained for the life of their Artifacts (never auto‑purged); they are removed only when you delete the Artifact. The `Artifact` resources are the source of truth for status.
 
 ---
 

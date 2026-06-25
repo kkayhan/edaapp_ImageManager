@@ -55,16 +55,6 @@
           "x-eda-nokia-com": {
             "ui-order-priority": 300
           }
-        },
-        "retentionDays": {
-          "description": "RetentionDays purges the PVC-stored copy of an upload this many days\nafter its Artifact reports Available (eda-asvr has re-hosted it, so the\nlocal copy is redundant). 0 keeps local copies forever.",
-          "type": "integer",
-          "title": "Local copy retention (days)",
-          "default": 0,
-          "minimum": 0,
-          "x-eda-nokia-com": {
-            "ui-order-priority": 500
-          }
         }
       },
       "x-eda-nokia-com": {

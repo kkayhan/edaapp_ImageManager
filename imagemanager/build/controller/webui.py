@@ -195,6 +195,15 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .dialog-body { padding:8px 24px 4px; }
   .dialog-body p { margin:6px 0 4px; color:var(--muted); font-size:13.5px; }
   .dialog-actions { display:flex; justify-content:flex-end; gap:8px; padding:14px 18px 18px; }
+  .dialog-title.danger-title { color:var(--err-fg); }
+  .warn-list { margin:10px 0 4px; padding-left:18px; color:var(--muted); font-size:13px; line-height:1.5; }
+  .warn-list li { margin:3px 0; }
+  .warn-list li b, .warn-list li .mono { color:var(--fg); }
+  label.ack { display:flex; align-items:flex-start; gap:9px; margin:14px 0 2px; padding:10px 12px;
+    background:var(--err-bg); border:1px solid var(--err-bd); border-radius:9px;
+    font-size:12.5px; color:var(--fg); cursor:pointer; }
+  label.ack input { margin-top:1px; accent-color:var(--err-fg); flex:none; }
+  .btn.text.danger:disabled { color:var(--muted); background:transparent; cursor:not-allowed; opacity:.55; }
 
   /* ---------- text fields (outlined, floating label) ---------- */
   .tf { position:relative; margin-top:18px; }
@@ -350,13 +359,17 @@ INDEX_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<!-- confirm dialog -->
+<!-- delete-artifact confirm dialog (warning + explicit acknowledgement) -->
 <div class="dialog confirm" id="confirmDialog" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
-  <h2 class="dialog-title" id="confirmTitle">Delete image</h2>
-  <div class="dialog-body"><p id="confirmText"></p></div>
+  <h2 class="dialog-title danger-title" id="confirmTitle">Delete artifact</h2>
+  <div class="dialog-body">
+    <p id="confirmLead"></p>
+    <ul class="warn-list" id="confirmList"></ul>
+    <label class="ack"><input type="checkbox" id="confirmAck"> I understand this permanently removes the artifact and can't be undone.</label>
+  </div>
   <div class="dialog-actions">
     <button class="btn text subtle ripple" id="confirmCancel">Cancel</button>
-    <button class="btn text danger ripple" id="confirmOk">Delete</button>
+    <button class="btn text danger ripple" id="confirmOk" disabled>Delete artifact</button>
   </div>
 </div>
 
@@ -447,13 +460,23 @@ INDEX_HTML = r"""<!DOCTYPE html>
   el("openUpload").addEventListener("click", function(){ openModal(el("uploadDialog")); });
   el("cancelUpload").addEventListener("click", closeModal);
 
-  // ---------- confirm dialog ----------
-  var confirmText=el("confirmText"), pendingConfirm=null;
-  function askConfirm(text, onYes){ confirmText.textContent=text; pendingConfirm=onYes; openModal(el("confirmDialog")); }
+  // ---------- delete-artifact confirm dialog ----------
+  // The destructive Delete button stays disabled until the user ticks the
+  // acknowledgement, so deletion is always an informed, explicit action.
+  var confirmLead=el("confirmLead"), confirmList=el("confirmList"),
+      confirmAck=el("confirmAck"), confirmOk=el("confirmOk"), pendingConfirm=null;
+  confirmAck.addEventListener("change", function(){ confirmOk.disabled = !confirmAck.checked; });
   el("confirmCancel").addEventListener("click", closeModal);
-  el("confirmOk").addEventListener("click", function(){
+  confirmOk.addEventListener("click", function(){
+    if(!confirmAck.checked) return;
     var fn=pendingConfirm; pendingConfirm=null; closeModal(); if(fn) fn();
   });
+  function askDelete(lead, items, onYes){
+    confirmLead.innerHTML = lead;
+    confirmList.innerHTML = items.map(function(s){ return "<li>"+s+"</li>"; }).join("");
+    confirmAck.checked=false; confirmOk.disabled=true; pendingConfirm=onYes;
+    openModal(el("confirmDialog"));
+  }
 
   // ---------- config + namespaces ----------
   fetch(api("/api/config")).then(function(r){return r.json();}).then(function(c){
@@ -597,11 +620,28 @@ INDEX_HTML = r"""<!DOCTYPE html>
   }
 
   function imDelete(uid, nsv, name){
-    askConfirm('Delete "'+name+'"? This removes it from EDA and the artifact server, and deletes the local copy.', function(){
+    var t=null;
+    for(var i=0;i<currentData.length;i++){ if(currentData[i].uploadId===uid){ t=currentData[i]; break; } }
+    var label=name||uid||"this image";
+    var hasYang=!!(t && t.yangStatus);
+    var removes=(t && t.nos==="sros")
+      ? ('Removes all '+(t.fileCount||'the')+' boot-image Artifacts, their md5 Artifacts'
+         +(hasYang?', and the YANG schema-profile Artifact':'')+' from EDA.')
+      : ('Removes the image Artifact, its md5 Artifact'
+         +(hasYang?', and the YANG schema-profile Artifact':'')+' from EDA.');
+    var lead='Permanently delete <b class="mono">'+esc(label)+'</b>'
+             +(nsv?(' in <span class="mono">'+esc(nsv)+'</span>'):'')+'?';
+    askDelete(lead, [
+      removes,
+      '<span class="mono">eda-asvr</span> stops hosting it — the served image URLs will return 404.',
+      'Any NodeProfile, node bootstrap (ZTP) or image upgrade that points at this image will fail until you re-add a valid image.',
+      'This app holds the only durable copy, so its local file is deleted too — to restore it you must re-upload the vendor .zip.',
+      'This cannot be undone.'
+    ], function(){
       var qs=new URLSearchParams({uploadId:uid||"", namespace:nsv||"", name:name||""});
       fetch(api("/api/delete")+"?"+qs.toString(), {method:"POST"})
         .then(function(r){return r.json();})
-        .then(function(d){ if(d && d.ok){ snack("ok","Deleted "+name+"."); refresh(); }
+        .then(function(d){ if(d && d.ok){ snack("ok","Deleted "+label+"."); refresh(); }
                            else { snack("err","Delete failed: "+((d&&d.error)||"unknown"), true); } })
         .catch(function(){ snack("err","Delete failed (network).", true); });
     });
