@@ -113,12 +113,12 @@ Image names are unique — to replace an image, delete the old one first.
 
 Once a row is `Available`, click **node profile** to open the popup. The **snippet** drops straight into an existing `NodeProfile`'s `spec.images`; the **complete example** is a ready‑to‑edit NodeProfile (the image paths/version/OS/`yang:` are filled in; `<…>` values like the management pool and DNS are yours to set). The paths are where `eda-asvr` serves the file(s).
 
-SR Linux (the `imageMd5` line comes from the `.md5` packaged in the zip):
+SR Linux (each file is re‑hosted under its real shipped name — the image as `…/<image>.bin`, its checksum as `…/<image>.bin.md5`, which is what SR Linux ZTP expects; the `imageMd5` line comes from the `.md5` packaged in the zip):
 
 ```yaml
 images:
-  - image: eda/images/srlinux-26.3.9/srlinux-26.3.9
-    imageMd5: eda/images/srlinux-26.3.9-md5/srlinux-26.3.9-md5
+  - image: eda/images/srlinux-26.3.9/srlinux-26.3.9.bin
+    imageMd5: eda/images/srlinux-26.3.9-md5/srlinux-26.3.9.bin.md5
 ```
 
 SR OS — every boot file is its own image entry (each with its `imageMd5`), and the schema profile is the `yang:`:

@@ -479,8 +479,8 @@ class Handler(BaseHTTPRequestHandler):
         """SR Linux: extract the .bin (+ its packaged md5) from the temp zip into
         the image dir, create the image (+md5) Artifact, then resolve the YANG."""
         repo = (CONFIG.get("defaultRepo") or "images").strip()
-        # Lowercase everywhere: this name becomes the Artifact name, the served
-        # filePath and the NodeProfile name, so capitals must never get through.
+        # Lowercase everywhere: this name becomes the Artifact name and the
+        # NodeProfile name, so capitals must never get through.
         display_name = (name_override or uploads.derive_name(filename)).strip().lower()
         artifact_name = uploads.to_k8s_name(display_name)
         if not artifact_name:
@@ -502,12 +502,18 @@ class Handler(BaseHTTPRequestHandler):
             return
         written = os.path.getsize(os.path.join(upload_dir, bin_filename))
         md5_artifact_name = (artifact_name + "-md5") if md5 else ""
-        uploads.finalize_upload(artifact_name, bin_filename, md5, repo, display_name,
+        # Re-host each artifact under its real shipped filename: eda-asvr serves it at
+        # <ns>/<repo>/<artifactName>/<filePath>, so filePath carries the extension SR
+        # Linux ZTP expects -- the image as <name>.bin and its checksum as <name>.bin.md5.
+        # The same value is recorded in meta.json so the UI matches what is served.
+        image_file_path = bin_filename
+        md5_file_path = bin_filename + ".md5"
+        uploads.finalize_upload(artifact_name, bin_filename, md5, repo, image_file_path,
                                 namespace, written, artifact_name, display_name, md5_artifact_name)
         base_url = CONFIG.get("filePullBaseUrl") or artifact.default_base_url(POD_NAMESPACE)
         file_url, md5_url = artifact.file_urls(base_url, artifact_name, bin_filename)
         try:
-            artifact.create_artifact(namespace, artifact_name, repo, display_name,
+            artifact.create_artifact(namespace, artifact_name, repo, image_file_path,
                                      file_url, md5_url if md5 else None)
         except urllib.error.HTTPError as e:
             shutil.rmtree(upload_dir, ignore_errors=True)
@@ -531,7 +537,7 @@ class Handler(BaseHTTPRequestHandler):
         if md5:
             try:
                 artifact.create_artifact(namespace, md5_artifact_name, repo,
-                                         display_name + "-md5", md5_url, None)
+                                         md5_file_path, md5_url, None)
             except Exception as e:  # noqa: BLE001 - md5 sidecar Artifact is best-effort
                 logger.warning("md5 Artifact %s/%s create failed: %s",
                                namespace, md5_artifact_name, e)
@@ -558,7 +564,7 @@ class Handler(BaseHTTPRequestHandler):
                     bin_filename, written, bool(md5), yang_created, namespace, artifact_name)
         self._send_json({"ok": True, "uploadId": artifact_name, "artifactName": artifact_name,
                          "displayName": display_name, "namespace": namespace, "repo": repo,
-                         "nos": "srl", "filePath": display_name, "md5": md5 or "",
+                         "nos": "srl", "filePath": image_file_path, "md5": md5 or "",
                          "sizeBytes": written, "fromZip": True, "filename": bin_filename,
                          "yangCreated": yang_created})
 
