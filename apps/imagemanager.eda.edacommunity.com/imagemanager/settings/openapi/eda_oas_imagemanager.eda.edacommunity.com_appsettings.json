@@ -31,10 +31,10 @@
           "default": "500m"
         },
         "controllerMemoryLimit": {
-          "description": "Memory limit for the Image Manager controller pod (Kubernetes quantity, e.g. \"256Mi\").",
+          "description": "Memory limit for the Image Manager controller pod (Kubernetes quantity, e.g. \"512Mi\").",
           "type": "string",
           "title": "Controller memory limit",
-          "default": "256Mi"
+          "default": "512Mi"
         },
         "uploadStorageSize": {
           "description": "Size of the persistent volume that stores uploaded images before eda-asvr\nre-hosts them (Kubernetes quantity, e.g. \"20Gi\"). Set this large enough to\nhold the images you intend to upload concurrently.",
