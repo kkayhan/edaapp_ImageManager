@@ -27,7 +27,7 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: imagemanager-controller
-          image: ghcr.io/kkayhan/edaapp_imagemanager/imagemanager-controller:v26.4.2-17
+          image: ghcr.io/kkayhan/edaapp_imagemanager/imagemanager-controller:v26.4.2-18
           imagePullPolicy: IfNotPresent
           env:
             - name: POD_NAMESPACE
@@ -69,10 +69,10 @@ spec:
           resources:
             limits:
               cpu: "500m" # app-set: ${controllerCpuLimit}
-              memory: "256Mi" # app-set: ${controllerMemoryLimit}
+              memory: "512Mi" # app-set: ${controllerMemoryLimit}
             requests:
               cpu: "100m"
-              memory: "128Mi"
+              memory: "256Mi"
       volumes:
         - name: upload-data
           persistentVolumeClaim:

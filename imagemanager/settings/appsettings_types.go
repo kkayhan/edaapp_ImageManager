@@ -11,8 +11,10 @@ type AppSettingsSpec struct {
 	// +eda:ui:title="Controller CPU limit"
 	ControllerCpuLimit string `json:"controllerCpuLimit,omitempty"`
 
-	// Memory limit for the Image Manager controller pod (Kubernetes quantity, e.g. "256Mi").
-	// +kubebuilder:default="256Mi"
+	// Memory limit for the Image Manager controller pod (Kubernetes quantity, e.g. "512Mi").
+	// Default 512Mi: uploads stream to disk, but a fast push to CephFS can hold up to
+	// ~32Mi of not-yet-flushed page cache per concurrent upload (cgroup-charged).
+	// +kubebuilder:default="512Mi"
 	// +eda:ui:title="Controller memory limit"
 	ControllerMemoryLimit string `json:"controllerMemoryLimit,omitempty"`
 

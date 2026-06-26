@@ -37,6 +37,43 @@ logger = logging.getLogger("uploads")
 
 DATA_DIR = "/data/uploads"
 _CHUNK = 1024 * 1024  # 1 MiB
+# A fast upload (e.g. 20 MB/s) to slower backing storage (CephFS) piles up dirty
+# pages in the kernel page cache, which cgroup v2 charges to the container's
+# memory limit -> OOMKill mid-upload (502 at the proxy). Periodically force the
+# written bytes to disk and drop them from the page cache so the container's
+# memory stays flat regardless of upload speed or how many uploads run at once.
+_FADV_EVERY = 32 * 1024 * 1024  # 32 MiB
+
+
+def _trim_write_cache(fileobj):
+    """Best-effort: flush + fsync `fileobj`, then evict its pages from the page
+    cache (POSIX_FADV_DONTNEED). Keeps cgroup-charged page cache from growing
+    while writing a large file. No-op where fadvise is unavailable."""
+    try:
+        fileobj.flush()
+        os.fsync(fileobj.fileno())
+        if hasattr(os, "posix_fadvise") and hasattr(os, "POSIX_FADV_DONTNEED"):
+            os.posix_fadvise(fileobj.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+    except OSError:
+        pass
+
+
+def _copy_streaming(src, dst):
+    """Copy src -> dst in _CHUNK blocks, trimming the write cache every
+    _FADV_EVERY bytes (and once at the end) so a large copy stays memory-flat."""
+    since = 0
+    while True:
+        buf = src.read(_CHUNK)
+        if not buf:
+            break
+        dst.write(buf)
+        since += len(buf)
+        if since >= _FADV_EVERY:
+            _trim_write_cache(dst)
+            since = 0
+    _trim_write_cache(dst)
+
+
 # Recognize Nokia SR Linux image filenames (e.g.
 # "Nokia-7220_IXR_SR_Linux-<hw>-26.3.2.zip") and a semantic version in them.
 _SRLINUX_RE = re.compile(r"sr[ _-]?linux", re.I)
@@ -187,7 +224,7 @@ def extract_image_from_zip(zip_path, dest_dir):
         bin_filename = sanitize_filename(os.path.basename(bin_m.filename))
         out_path = os.path.join(dest_dir, bin_filename)
         with zf.open(bin_m, "r") as src, open(out_path, "wb") as out:
-            shutil.copyfileobj(src, out, _CHUNK)
+            _copy_streaming(src, out)
         md5 = None
         md5_members = [m for m in members
                        if os.path.basename(m.filename).lower().endswith((".md5", ".md5sum"))]
@@ -271,7 +308,7 @@ def extract_sros_images(zip_path, dest_dir):
             safe = sanitize_filename(base)
             out_path = os.path.join(dest_dir, safe)
             with zf.open(m, "r") as src, open(out_path, "wb") as out:
-                shutil.copyfileobj(src, out, _CHUNK)
+                _copy_streaming(src, out)
             md5 = md5_by_path.get(_norm_md5_path(m.filename)) or md5_by_base.get(base)
             extracted.append({"filename": safe, "size": m.file_size, "md5": md5})
     try:
@@ -295,6 +332,7 @@ def stream_upload(rfile, content_length, dest_path, max_bytes):
 
     written = 0
     remaining = content_length
+    last_trim = 0
     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
     with open(dest_path, "wb") as out:
         while remaining > 0:
@@ -306,6 +344,12 @@ def stream_upload(rfile, content_length, dest_path, max_bytes):
             remaining -= len(chunk)
             if max_bytes and written > max_bytes:
                 raise UploadTooLarge(f"upload exceeded limit {max_bytes}")
+            # keep the kernel page cache (cgroup-charged) from piling up dirty
+            # pages when the upload outruns CephFS writeback
+            if written - last_trim >= _FADV_EVERY:
+                _trim_write_cache(out)
+                last_trim = written
+        _trim_write_cache(out)
     return written
 
 
