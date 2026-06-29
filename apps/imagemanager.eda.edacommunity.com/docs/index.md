@@ -24,10 +24,10 @@ automatically. Three kinds are supported:
   unpacks it and serves it from a built‑in OCI registry endpoint, and gives you a ready‑to‑paste
   sim **NodeProfile** (`containerImage`). A small one‑time, per‑cluster registry‑mirror setup
   lets the node pull it.
-* **Licenses (optional)** — attach a Nokia simulator/node **license key file** with any image.
-  The app stores it as a `license.key` **ConfigMap** in `eda-system` and wires
-  `spec.license: <image>-license` into the generated NodeProfile. A sim boots without one;
-  attach a key only to unlock licensed scale/features.
+* **Licenses (optional)** — **paste a Nokia simulator/node license key** into the upload dialog
+  (extra spaces/labels are parsed out for you). The app stores it as a `license.key` **ConfigMap**
+  in `eda-system` and wires `spec.license: <image>-license` into the generated NodeProfile. A sim
+  boots without one; add a key only to unlock licensed scale/features.
 
 After install, open the app UI (while signed into the EDA UI) at
 `https://<your-eda-address>/core/httpproxy/v1/imagemanager/`, pick a vendor `.zip`, choose the
