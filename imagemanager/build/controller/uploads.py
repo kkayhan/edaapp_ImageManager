@@ -578,16 +578,18 @@ def normalize_license(raw):
     entries = []
     for line in (raw or "").splitlines():
         s = line.strip()
-        # Drop ONE surrounding matching quote/backtick pair around the whole line
-        # (a user may wrap the pasted entry in quotes). Done on the full line, BEFORE
-        # slicing from the UUID, so a label that genuinely ends in a quote is kept
-        # verbatim (it has no matching leading quote to pair with).
-        if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'`":
-            s = s[1:-1].strip()
         m = _LIC_ENTRY_RE.search(s)
         if not m:
             continue                       # skip blank / comment-only / junk lines
-        entry = s[m.start():].strip()      # from the UUID to end-of-line, kept verbatim
+        entry = s[m.start():].strip()      # from the UUID to end-of-line (key kept verbatim)
+        # Strip a trailing wrap quote/backtick ONLY when the text before the key ends
+        # with the SAME quote — i.e. the whole entry was wrapped, possibly behind a
+        # label like 'license: "<uuid> <key>"'. A genuine trailing quote on a vendor
+        # label (no matching opening quote) is kept verbatim. The key itself can never
+        # end in a quote (base64 alphabet excludes them).
+        prefix = s[:m.start()].rstrip()
+        if prefix and prefix[-1] in "\"'`" and entry and entry[-1] == prefix[-1]:
+            entry = entry[:-1].rstrip()
         if entry:
             entries.append(entry)
     return "\n".join(entries)
