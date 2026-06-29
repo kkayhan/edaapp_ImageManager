@@ -5,7 +5,9 @@ automatically. **SR Linux** and **SR OS 7750 (TiMOS) hardware** images become ED
 that the built‑in artifact server (`eda-asvr`) downloads, md5‑validates, and re‑hosts for ZTP
 and software upgrades. **SR‑SIM** (the SR OS *simulator* for EDA's Digital Twin) is a container
 image: the app serves it from a built‑in OCI registry and gives you a sim **NodeProfile**
-(`containerImage`). The md5 and YANG schema profile are handled for you.
+(`containerImage`). The md5 and YANG schema profile are handled for you. You can also attach a
+Nokia **license key file** with any image — it's stored as a `license.key` ConfigMap in
+`eda-system` and referenced from the NodeProfile's `spec.license` (a sim boots without one).
 
 EDA's artifact server uses a pull model that integrates with an organization's central
 image store or data lake — the right fit for production. This app is the lab‑friendly
