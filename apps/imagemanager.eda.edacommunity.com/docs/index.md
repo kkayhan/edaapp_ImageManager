@@ -12,16 +12,23 @@
 [manifest]: https://github.com/kkayhan/edaapp_ImageManager/tree/main/apps/imagemanager.eda.edacommunity.com
 [src]: https://github.com/kkayhan/edaapp_ImageManager
 
-Upload network OS images (`.bin`) and their `.md5` checksums through a web page. Each upload
-is stored in‑cluster and an EDA **Artifact** is created automatically, so the built‑in artifact
-server (`eda-asvr`) downloads the file, validates it against the md5, and re‑hosts it for
-Zero‑Touch Provisioning and software upgrades. This removes the need to run an external file
-server and to hand‑write `Artifact` resources.
+Upload Nokia NOS images as vendor **`.zip`** files through a web page — the type is detected
+automatically. Three kinds are supported:
+
+* **SR Linux** and **SR OS 7750 (TiMOS) hardware** images become EDA **Artifacts**: each upload
+  is stored in‑cluster and the built‑in artifact server (`eda-asvr`) downloads, md5‑validates,
+  and re‑hosts the file(s) for Zero‑Touch Provisioning and software upgrades. The matching md5
+  and YANG schema profile are handled for you. No external file server, no hand‑written
+  `Artifact` resources.
+* **SR‑SIM** (the SR OS *simulator* for EDA's Digital Twin) is a **container image**: the app
+  unpacks it and serves it from a built‑in OCI registry endpoint, and gives you a ready‑to‑paste
+  sim **NodeProfile** (`containerImage`). A small one‑time, per‑cluster registry‑mirror setup
+  lets the node pull it.
 
 After install, open the app UI (while signed into the EDA UI) at
-`https://<your-eda-address>/core/httpproxy/v1/imagemanager/`, pick a `.bin` (and optionally its
-`.md5`), set the repo / namespace / file path, and upload. A status table shows each artifact
-move from `InProgress` to `Available` along with its reusable URL.
+`https://<your-eda-address>/core/httpproxy/v1/imagemanager/`, pick a vendor `.zip`, choose the
+namespace, and upload. A status table shows each image move to `Available` (file images) or
+`Ready` (SR‑SIM), with a per‑row **Details** popup giving the NodeProfile to use.
 
 The application provides the following components:
 
