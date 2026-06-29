@@ -1270,13 +1270,11 @@ def _group_row(m, status_by_key):
 def _sim_nodeprofile_yaml(version, namespace, prof_name, container_image, yang_url,
                           license_cm=None):
     """A complete, copy-ready SR OS *simulator* NodeProfile: containerImage points
-    at this app's /v2 endpoint, plus a license ConfigMap. When `license_cm` is set
-    (a real license was uploaded with this image), spec.license references the
-    ConfigMap Image Manager already created in eda-system -- no extra YAML to apply.
-    Otherwise a dummy empty-license ConfigMap is included inline (a sim boots on an
-    empty license). <…> values are for the operator to set."""
-    real = bool(license_cm)
-    cm = license_cm or "sros-sim-license"
+    at this app's /v2 endpoint. When `license_cm` is set (a license was pasted with
+    this image) spec.license references the ConfigMap Image Manager already created
+    in eda-system; otherwise the license line is left as a comment (no inline
+    ConfigMap — Image Manager creates the ConfigMap itself when you paste a key).
+    <…> values are for the operator to set."""
     L = [
         "apiVersion: core.eda.nokia.com/v1",
         "kind: NodeProfile",
@@ -1291,11 +1289,13 @@ def _sim_nodeprofile_yaml(version, namespace, prof_name, container_image, yang_u
         f"  containerImage: {container_image}",
         "  imagePullSecret: core      # a Secret in eda-system (where sims run); 'core' exists "
         "and works — this registry is anonymous, so its contents are unused",
-        (f"  license: {cm}      # ConfigMap (eda-system) created by Image Manager from your "
-         "uploaded license key — already applied"
-         if real else
-         f"  license: {cm}      # ConfigMap below (an SR-SIM sim boots on an empty license)"),
     ]
+    if license_cm:
+        L.append(f"  license: {license_cm}      # ConfigMap (eda-system) created by Image Manager "
+                 "from your pasted license key — already applied")
+    else:
+        L.append("  # license: <license-configmap>      # optional — paste a license key when you "
+                 "upload the image and Image Manager creates + wires this for you")
     if yang_url:
         L.append(f"  yang: {yang_url}")
     else:
@@ -1308,83 +1308,13 @@ def _sim_nodeprofile_yaml(version, namespace, prof_name, container_image, yang_u
         "  dhcp:",
         "    managementPoolv4: <your-ipv4-mgmt-pool>",
     ]
-    if not real:
-        L += [
-            "---",
-            "# License ConfigMap referenced above. The Digital Twin SR-SIM accepts an",
-            "# empty dummy license; upload a real key with the image to have Image",
-            "# Manager create it for you.",
-            "apiVersion: v1",
-            "kind: ConfigMap",
-            "metadata:",
-            f"  name: {cm}",
-            "  namespace: eda-system",
-            "data:",
-            '  license.key: ""',
-        ]
     return "\n".join(L)
-
-
-def _sim_setup_note(container_image, namespace, prof_name):
-    """One-time, per-cluster instructions: teach the node's containerd to pull
-    from this app's registry, plus a topology to launch the sim."""
-    host = sim_registry_host()
-    return "\n".join([
-        "ONE-TIME SETUP (per cluster) — let the node pull this image",
-        "EDA's Digital Twin (eda-cx) starts the sim with the node's container",
-        f"runtime, which must be told how to reach Image Manager's registry. Add a",
-        f"Talos registry mirror for host '{host}' that points at the eda-imagemanager",
-        "Service (ClusterIP:8443):",
-        "",
-        "  machine:",
-        "    registries:",
-        "      mirrors:",
-        f"        {host}:",
-        "          endpoints:",
-        "            - https://<ClusterIP>:8443",
-        "      config:",
-        "        # Key the TLS setting on the ENDPOINT (<ClusterIP>:8443) the node",
-        "        # actually connects to -- NOT the host above. The in-cluster serving",
-        "        # cert has no IP SAN, so verifying it against the ClusterIP fails;",
-        "        # skip verification for this in-cluster endpoint.",
-        '        "<ClusterIP>:8443":',
-        "          tls:",
-        "            insecureSkipVerify: true",
-        "",
-        "  # <ClusterIP>: kubectl -n eda-system get svc eda-imagemanager -o jsonpath='{.spec.clusterIP}'",
-        "  # apply with no reboot: talosctl -n <node> patch mc -p @mirror.json --mode=no-reboot",
-        "  # (re-apply after any reinstall -- the ClusterIP can change.)",
-        "",
-        "LAUNCH A SIM NODE — apply the NodeProfile above, then a topology:",
-        "",
-        "apiVersion: topologies.eda.nokia.com/v1",
-        "kind: NetworkTopology",
-        "metadata:",
-        "  name: srsim-demo",
-        f"  namespace: {namespace}",
-        "spec:",
-        "  operation: Create",
-        "  nodeTemplates:",
-        "    - name: srsim",
-        f"      nodeProfile: {prof_name}",
-        '      platform: "7750 SR-1"',
-        "  nodes:",
-        "    - name: srsim1",
-        "      template: srsim",
-        "",
-        "NOTES",
-        f"- A NodeUser named 'admin' must exist in namespace '{namespace}' (referenced by the profile).",
-        "- imagePullSecret must name a Secret that exists in eda-system (where the sim pod runs);",
-        "  eda-cx requires the field, but this anonymous registry never uses its contents. The",
-        "  built-in 'core' secret works.",
-    ])
 
 
 def _srsim_row(m, status_by_key):
     """Tracked-list row for an SR-SIM container image. Served from our own /v2
     endpoint (no eda-asvr Artifact), so it is Ready as soon as it is unpacked. The
-    Details popup yields a sim NodeProfile (containerImage) + the one-time node
-    registry-mirror setup."""
+    Details popup yields a copy-ready sim NodeProfile (containerImage)."""
     ns = m.get("namespace")
     artifact_name = m.get("artifactName")
     tag = m.get("imageTag") or m.get("version") or "latest"
@@ -1401,7 +1331,6 @@ def _srsim_row(m, status_by_key):
                + ("\nlicense: " + license_cm if license_cm else ""))
     example = _sim_nodeprofile_yaml(version, ns, artifact_name or "my-sim-nodeprofile",
                                     container_image, yang_url, license_cm or None)
-    setup = _sim_setup_note(container_image, ns, artifact_name or "my-sim-nodeprofile")
     return {
         "uploadId": m.get("uploadId"),
         "name": artifact_name,
@@ -1415,7 +1344,6 @@ def _srsim_row(m, status_by_key):
         "statusReason": "",
         "snippet": snippet,
         "nodeProfileExample": example,
-        "setupNote": setup,
         "nos": "srsim",
         "containerImage": container_image,
         "imageTag": tag,

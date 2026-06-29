@@ -403,10 +403,6 @@ INDEX_HTML = r"""<!DOCTYPE html>
       <div class="np-head"><span class="np-label">Complete NodeProfile example</span><button class="iconbtn copybtn ripple" id="npCopyFull">Copy</button></div>
       <pre class="snippet" id="npFull"></pre>
     </div>
-    <div class="np-sec" id="npNoteSec" style="display:none">
-      <div class="np-head"><span class="np-label">One-time setup &amp; how to launch a sim</span><button class="iconbtn copybtn ripple" id="npCopyNote">Copy</button></div>
-      <pre class="snippet" id="npNote"></pre>
-    </div>
   </div>
   <div class="dialog-actions">
     <button class="btn text subtle ripple" id="npClose">Close</button>
@@ -756,7 +752,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   }
 
   // ---------- NodeProfile dialog (snippet + complete example) ----------
-  var npSnippet=el("npSnippet"), npFull=el("npFull"), npNote=el("npNote");
+  var npSnippet=el("npSnippet"), npFull=el("npFull");
   function copyBtn(btn, text){
     if(navigator.clipboard) navigator.clipboard.writeText(text||"");
     var t0=btn.textContent; btn.textContent="Copied"; setTimeout(function(){ btn.textContent=t0; }, 1200);
@@ -770,7 +766,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     // fragment; relabel the snippet section + intro accordingly.
     var isSim=(t.nos==="srsim");
     el("npIntro").innerHTML = isSim
-      ? 'Copy the <b>complete sim NodeProfile</b> below (it sets <span class="mono">containerImage</span> + a license), or paste the <b>snippet</b> fields into an existing <span class="mono">NodeProfile</span>. Then follow the <b>one-time setup</b> so the node can pull the image.'
+      ? 'Copy the <b>complete sim NodeProfile</b> below, or paste the <b>snippet</b> fields into an existing <span class="mono">NodeProfile</span>. The <span class="mono">containerImage</span>, version and <span class="mono">yang</span> are filled from this image; <span class="mono">&lt;…&gt;</span> values are for you to set.'
       : 'Paste the <b>snippet</b> into an existing <span class="mono">NodeProfile</span>\'s <span class="mono">spec.images</span>, or copy the <b>complete example</b> as a starting point. The image path(s), version, OS and <span class="mono">yang</span> are filled from this image; <span class="mono">&lt;…&gt;</span> values are for you to set.';
     if(t.license){
       el("npIntro").innerHTML += ' <b>License:</b> Image Manager created the ConfigMap '+
@@ -782,16 +778,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
       : 'Snippet &mdash; <span class="mono">spec.images</span>';
     npSnippet.textContent = t.snippet || "(not ready yet)";
     npFull.textContent = t.nodeProfileExample || "(ready once the image is Available)";
-    // SR-SIM images carry one-time, per-cluster setup notes (registry mirror +
-    // how to launch a sim); show that section only when present.
-    if(t.setupNote){ npNote.textContent=t.setupNote; el("npNoteSec").style.display=""; }
-    else { el("npNoteSec").style.display="none"; }
     openModal(el("npDialog"));
   }
   el("npClose").addEventListener("click", closeModal);
   el("npCopySnip").addEventListener("click", function(){ copyBtn(this, npSnippet.textContent); });
   el("npCopyFull").addEventListener("click", function(){ copyBtn(this, npFull.textContent); });
-  el("npCopyNote").addEventListener("click", function(){ copyBtn(this, npNote.textContent); });
 
   rows.addEventListener("click", function(e){
     var b = e.target.closest("button[data-act]");
