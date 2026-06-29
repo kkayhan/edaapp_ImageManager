@@ -162,7 +162,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .chip { display:inline-flex; align-items:center; gap:6px; padding:3px 11px; border-radius:13px;
     font-size:11.5px; font-weight:600; border:1px solid transparent; white-space:nowrap; }
   .chip::before { content:""; width:7px; height:7px; border-radius:50%; background:currentColor; }
-  .c-Available { background:var(--ok-bg); color:var(--ok-fg); border-color:var(--ok-bd); }
+  .c-Available, .c-Ready { background:var(--ok-bg); color:var(--ok-fg); border-color:var(--ok-bd); }
   .c-InProgress { background:var(--info-bg); color:var(--info-fg); border-color:var(--info-bd); }
   .c-Error, .c-Failed { background:var(--err-bg); color:var(--err-fg); border-color:var(--err-bd); }
   .c-NoArtifact, .c-empty { background:var(--neutral-bg); color:var(--neutral-fg); border-color:var(--neutral-bd); }
@@ -290,7 +290,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <header class="appbar">
   <span class="brand-mark"></span>
   <span class="brand-name">EDA Image Manager</span>
-  <span class="sub">Upload a NOS image &rarr; hosted in-cluster &rarr; Artifact created &rarr; eda-asvr re-hosts it</span>
+  <span class="sub">Upload a NOS image (SR Linux / SR OS / SR-SIM) &rarr; hosted in-cluster &rarr; ready for EDA bootstrap or the Digital Twin</span>
   <div class="appbar-actions">
     <span id="userInfo" class="user-chip" style="display:none"><span class="avatar" id="avatar"></span><span class="uname" id="uname"></span></span>
     <label class="switch" title="Toggle light / dark appearance">
@@ -365,7 +365,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <div class="tf">
       <input type="text" id="imageName" placeholder=" " autocomplete="off">
       <label for="imageName">Image name (auto-generated &mdash; edit if you like)</label>
-      <div class="helper" id="nameHint">SR Linux or SR OS is detected automatically from the zip; the md5 and YANG schema profile are handled for you.</div>
+      <div class="helper" id="nameHint">SR Linux, SR OS (7750 TiMOS) or SR-SIM (SR OS simulator) is detected automatically from the zip; the md5 and YANG schema profile are handled for you.</div>
     </div>
   </div>
   <div class="dialog-actions">
@@ -378,14 +378,18 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <div class="dialog wide" id="npDialog" role="dialog" aria-modal="true" aria-labelledby="npTitle">
   <h2 class="dialog-title" id="npTitle">NodeProfile</h2>
   <div class="dialog-body">
-    <p>Paste the <b>snippet</b> into an existing <span class="mono">NodeProfile</span>'s <span class="mono">spec.images</span>, or copy the <b>complete example</b> as a starting point. The image path(s), version, OS and <span class="mono">yang</span> are filled from this image; <span class="mono">&lt;…&gt;</span> values are for you to set.</p>
+    <p id="npIntro">Paste the <b>snippet</b> into an existing <span class="mono">NodeProfile</span>'s <span class="mono">spec.images</span>, or copy the <b>complete example</b> as a starting point. The image path(s), version, OS and <span class="mono">yang</span> are filled from this image; <span class="mono">&lt;…&gt;</span> values are for you to set.</p>
     <div class="np-sec">
-      <div class="np-head"><span class="np-label">Snippet &mdash; <span class="mono">spec.images</span></span><button class="iconbtn copybtn ripple" id="npCopySnip">Copy</button></div>
+      <div class="np-head"><span class="np-label" id="npSnipLabel">Snippet &mdash; <span class="mono">spec.images</span></span><button class="iconbtn copybtn ripple" id="npCopySnip">Copy</button></div>
       <pre class="snippet" id="npSnippet"></pre>
     </div>
     <div class="np-sec">
       <div class="np-head"><span class="np-label">Complete NodeProfile example</span><button class="iconbtn copybtn ripple" id="npCopyFull">Copy</button></div>
       <pre class="snippet" id="npFull"></pre>
+    </div>
+    <div class="np-sec" id="npNoteSec" style="display:none">
+      <div class="np-head"><span class="np-label">One-time setup &amp; how to launch a sim</span><button class="iconbtn copybtn ripple" id="npCopyNote">Copy</button></div>
+      <pre class="snippet" id="npNote"></pre>
     </div>
   </div>
   <div class="dialog-actions">
@@ -456,6 +460,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
   function deriveName(fn){
     var base=(fn||"").split(/[\\/]/).pop();
     var stem=base.replace(/\.[A-Za-z0-9]+$/,"");
+    if(/sr[ _-]?sim/i.test(base)){   // SR-SIM (container image) — distinct from HW SR OS
+      var xm=base.match(/(\d+\.\d+\.[Rr]\d+)/)||base.match(/(\d+\.\d+\.\d+(?:-\d+)?)/);
+      if(xm) return ("srsim-"+xm[1]).toLowerCase();
+    }
     if(/sr[ _-]?linux/i.test(base)){
       var m=base.match(/(\d+\.\d+\.\d+(?:-\d+)?)/);
       if(m) return ("srlinux-"+m[1]).toLowerCase();
@@ -594,7 +602,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
           // The authoritative row now exists server-side; clear the pending row.
           delete pendingUploads[key];
           var what=(r.displayName||name), msg;
-          if(r.nos==="sros") msg="Uploaded "+what+" — "+(r.fileCount||0)+" image files. "+(r.note||"");
+          if(r.nos==="srsim") msg="Uploaded "+what+" — SR-SIM image ready. Open Details for the sim NodeProfile and one-time setup."+(r.yangCreated?" YANG profile attached.":"");
+          else if(r.nos==="sros") msg="Uploaded "+what+" — "+(r.fileCount||0)+" image files. "+(r.note||"");
           else msg="Uploaded "+what+"."+(r.md5?(" md5 "+r.md5+"."):"")+(r.yangCreated?" YANG profile attached.":"");
           snack("ok", msg); refresh();
         } else { delete pendingUploads[key]; render();
@@ -658,16 +667,23 @@ INDEX_HTML = r"""<!DOCTYPE html>
     for(var i=0;i<currentData.length;i++){ if(currentData[i].uploadId===uid){ t=currentData[i]; break; } }
     var label=name||uid||"this image";
     var hasYang=!!(t && t.yangStatus);
-    var removes=(t && t.nos==="sros")
+    var isSrsim=(t && t.nos==="srsim");
+    var removes=isSrsim
+      ? ("Removes the SR-SIM container image from this app's registry"
+         +(hasYang?", and its YANG schema-profile Artifact":"")+".")
+      : (t && t.nos==="sros")
       ? ('Removes all '+(t.fileCount||'the')+' boot-image Artifacts, their md5 Artifacts'
          +(hasYang?', and the YANG schema-profile Artifact':'')+' from EDA.')
       : ('Removes the image Artifact, its md5 Artifact'
          +(hasYang?', and the YANG schema-profile Artifact':'')+' from EDA.');
+    var hostBullet=isSrsim
+      ? "EDA's Digital Twin (eda-cx) can no longer pull this image — creating or restarting a sim that uses it will fail."
+      : '<span class="mono">eda-asvr</span> stops hosting it — the served image URLs will return 404.';
     var lead='Permanently delete <b class="mono">'+esc(label)+'</b>'
              +(nsv?(' in <span class="mono">'+esc(nsv)+'</span>'):'')+'?';
     askDelete(lead, [
       removes,
-      '<span class="mono">eda-asvr</span> stops hosting it — the served image URLs will return 404.',
+      hostBullet,
       'Any NodeProfile, node bootstrap (ZTP) or image upgrade that points at this image will fail until you re-add a valid image.',
       'This app holds the only durable copy, so its local file is deleted too — to restore it you must re-upload the vendor .zip.',
       'This cannot be undone.'
@@ -682,7 +698,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   }
 
   // ---------- NodeProfile dialog (snippet + complete example) ----------
-  var npSnippet=el("npSnippet"), npFull=el("npFull");
+  var npSnippet=el("npSnippet"), npFull=el("npFull"), npNote=el("npNote");
   function copyBtn(btn, text){
     if(navigator.clipboard) navigator.clipboard.writeText(text||"");
     var t0=btn.textContent; btn.textContent="Copied"; setTimeout(function(){ btn.textContent=t0; }, 1200);
@@ -692,13 +708,27 @@ INDEX_HTML = r"""<!DOCTYPE html>
     for(var i=0;i<currentData.length;i++){ if(currentData[i].uploadId===uid){ t=currentData[i]; break; } }
     if(!t) return;
     el("npTitle").textContent = "NodeProfile — " + (t.displayName||t.name||"");
+    // SR-SIM emits a containerImage-based sim NodeProfile, not a spec.images
+    // fragment; relabel the snippet section + intro accordingly.
+    var isSim=(t.nos==="srsim");
+    el("npIntro").innerHTML = isSim
+      ? 'Copy the <b>complete sim NodeProfile</b> below (it sets <span class="mono">containerImage</span> + a license), or paste the <b>snippet</b> fields into an existing <span class="mono">NodeProfile</span>. Then follow the <b>one-time setup</b> so the node can pull the image.'
+      : 'Paste the <b>snippet</b> into an existing <span class="mono">NodeProfile</span>\'s <span class="mono">spec.images</span>, or copy the <b>complete example</b> as a starting point. The image path(s), version, OS and <span class="mono">yang</span> are filled from this image; <span class="mono">&lt;…&gt;</span> values are for you to set.';
+    el("npSnipLabel").innerHTML = isSim
+      ? 'Snippet &mdash; sim NodeProfile <span class="mono">spec</span>'
+      : 'Snippet &mdash; <span class="mono">spec.images</span>';
     npSnippet.textContent = t.snippet || "(not ready yet)";
     npFull.textContent = t.nodeProfileExample || "(ready once the image is Available)";
+    // SR-SIM images carry one-time, per-cluster setup notes (registry mirror +
+    // how to launch a sim); show that section only when present.
+    if(t.setupNote){ npNote.textContent=t.setupNote; el("npNoteSec").style.display=""; }
+    else { el("npNoteSec").style.display="none"; }
     openModal(el("npDialog"));
   }
   el("npClose").addEventListener("click", closeModal);
   el("npCopySnip").addEventListener("click", function(){ copyBtn(this, npSnippet.textContent); });
   el("npCopyFull").addEventListener("click", function(){ copyBtn(this, npFull.textContent); });
+  el("npCopyNote").addEventListener("click", function(){ copyBtn(this, npNote.textContent); });
 
   rows.addEventListener("click", function(e){
     var b = e.target.closest("button[data-act]");
@@ -711,7 +741,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   });
 
   // sorting
-  var STATUS_RANK={Available:0,InProgress:1,Error:2,Failed:3,NoArtifact:4};
+  var STATUS_RANK={Available:0,Ready:0,InProgress:1,Error:2,Failed:3,NoArtifact:4};
   var currentData=[], sortState=null;  // null = server order (newest first)
   function sortData(arr){
     if(!sortState) return arr;

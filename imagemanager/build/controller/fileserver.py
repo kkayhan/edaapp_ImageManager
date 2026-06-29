@@ -52,6 +52,20 @@ CONFIG = {
     "filePullBaseUrl": "",
 }
 POD_NAMESPACE = os.environ.get("POD_NAMESPACE", "eda-system")
+SERVICE_NAME = "eda-imagemanager"
+
+# OCI distribution (registry v2) path patterns. `name` may contain '/'.
+_V2_MANIFEST_RE = re.compile(r"^/v2/(.+)/manifests/(.+)$")
+_V2_BLOB_RE = re.compile(r"^/v2/(.+)/blobs/(sha256:[0-9a-f]{64})$")
+_SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
+
+
+def sim_registry_host():
+    """The registry host that the node's containerd reaches this app at (the
+    Service FQDN, which is also the serving cert's SAN). A one-time Talos
+    machine.registries mirror maps this host to the in-cluster Service. Used as
+    the host in a SR-SIM NodeProfile's containerImage."""
+    return f"{SERVICE_NAME}.{POD_NAMESPACE}.svc"
 
 # Material-styled standalone message page (sign-out / access-denied). Mirrors the
 # EDA palette + the saved Light/Dark preference used by the main UI.
@@ -228,6 +242,12 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/files/"):
                 self._serve_file(path[len("/files/"):], head_only=False)
                 return
+            # OCI registry (read-only) — the node's containerd pulls SR-SIM sim
+            # images from here. Machine traffic (no OIDC); auth is by network reach
+            # to the in-cluster Service, like /files/.
+            if path == "/v2" or path.startswith("/v2/"):
+                self._serve_registry_v2(path, head_only=False)
+                return
             # OIDC endpoints.
             if path == "/oauth/callback":
                 self._handle_oauth_callback(q)
@@ -269,6 +289,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path.startswith("/files/"):
                 self._serve_file(path[len("/files/"):], head_only=True)
+            elif path == "/v2" or path.startswith("/v2/"):
+                self._serve_registry_v2(path, head_only=True)
             elif path in ("/", "/healthz"):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain")
@@ -347,6 +369,130 @@ class Handler(BaseHTTPRequestHandler):
             return
         with open(full, "rb") as f:
             shutil.copyfileobj(f, self.wfile, _SERVE_CHUNK)
+
+    # --------------------------- OCI registry (read-only v2) ---------------------------
+
+    def _v2_404(self, msg="not found"):
+        body = json.dumps({"errors": [{"code": "NOT_FOUND", "message": msg}]}).encode()
+        self.send_response(404)
+        self.send_header("Docker-Distribution-Api-Version", "registry/2.0")
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _serve_registry_v2(self, path, head_only):
+        """Minimal pull-only OCI distribution endpoint backed by the OCI layouts
+        unpacked under /data/uploads/<name>/. Implements GET/HEAD /v2/ (version
+        check), /v2/<name>/manifests/<ref> and /v2/<name>/blobs/<digest>."""
+        if path in ("/v2", "/v2/"):
+            body = b"{}"
+            self.send_response(200)
+            self.send_header("Docker-Distribution-Api-Version", "registry/2.0")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if not head_only:
+                self.wfile.write(body)
+            return
+        m = _V2_MANIFEST_RE.match(path)
+        if m:
+            self._serve_oci_manifest(unquote(m.group(1)), unquote(m.group(2)), head_only)
+            return
+        b = _V2_BLOB_RE.match(path)
+        if b:
+            self._serve_oci_blob(unquote(b.group(1)), b.group(2), head_only)
+            return
+        self._v2_404("unsupported registry path")
+
+    def _serve_oci_manifest(self, name, ref, head_only):
+        meta, blobs_dir = uploads.srsim_meta(name)
+        if not meta:
+            self._v2_404("repository %s not found" % name)
+            return
+        manifest_digest = meta.get("manifestDigest") or ""
+        media = meta.get("manifestMediaType") or "application/vnd.oci.image.manifest.v1+json"
+        if ref == (meta.get("imageTag") or ""):
+            digest = manifest_digest
+        elif ref.startswith("sha256:"):
+            digest = ref
+        else:
+            self._v2_404("manifest %s unknown" % ref)
+            return
+        h = digest.split(":", 1)[1] if ":" in digest else ""
+        if not _SHA256_HEX.match(h):
+            self._v2_404("bad manifest digest")
+            return
+        full = os.path.join(blobs_dir, h)
+        if not os.path.isfile(full):
+            self._v2_404("manifest blob missing")
+            return
+        size = os.path.getsize(full)
+        self.send_response(200)
+        self.send_header("Docker-Distribution-Api-Version", "registry/2.0")
+        self.send_header("Content-Type",
+                         media if digest == manifest_digest else "application/octet-stream")
+        self.send_header("Docker-Content-Digest", digest)
+        self.send_header("Content-Length", str(size))
+        self.end_headers()
+        if head_only:
+            return
+        with open(full, "rb") as f:
+            shutil.copyfileobj(f, self.wfile, _SERVE_CHUNK)
+
+    def _serve_oci_blob(self, name, digest, head_only):
+        meta, blobs_dir = uploads.srsim_meta(name)
+        if not meta:
+            self._v2_404("repository %s not found" % name)
+            return
+        h = digest.split(":", 1)[1]
+        if not _SHA256_HEX.match(h):
+            self._v2_404("bad blob digest")
+            return
+        full = os.path.join(blobs_dir, h)
+        if not os.path.isfile(full):
+            self._v2_404("blob unknown")
+            return
+        size = os.path.getsize(full)
+        # Optional single-range request (containerd may resume large layer pulls).
+        start, end, partial = 0, size - 1, False
+        rng = self.headers.get("Range")
+        if rng:
+            mm = re.match(r"bytes=(\d+)-(\d*)$", rng.strip())
+            if mm:
+                start = int(mm.group(1))
+                end = int(mm.group(2)) if mm.group(2) else size - 1
+                if start <= end < size:
+                    partial = True
+                else:
+                    self.send_response(416)
+                    self.send_header("Docker-Distribution-Api-Version", "registry/2.0")
+                    self.send_header("Content-Range", "bytes */%d" % size)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+        length = (end - start + 1) if partial else size
+        self.send_response(206 if partial else 200)
+        self.send_header("Docker-Distribution-Api-Version", "registry/2.0")
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Docker-Content-Digest", digest)
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(length))
+        if partial:
+            self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
+        self.end_headers()
+        if head_only:
+            return
+        with open(full, "rb") as f:
+            if start:
+                f.seek(start)
+            remaining = length
+            while remaining > 0:
+                buf = f.read(min(_SERVE_CHUNK, remaining))
+                if not buf:
+                    break
+                self.wfile.write(buf)
+                remaining -= len(buf)
 
     # --------------------------- POST ---------------------------
 
@@ -464,14 +610,17 @@ class Handler(BaseHTTPRequestHandler):
                                  "error": "the uploaded file is not a valid .zip archive"}, 400)
                 return
             nos = uploads.detect_nos_from_zip(tmp_zip)
-            if nos == "sros":
+            if nos == "srsim":
+                self._finish_srsim_upload(tmp_zip, filename, namespace, name_override)
+            elif nos == "sros":
                 self._finish_sros_upload(tmp_dir, tmp_zip, namespace, name_override)
             elif nos == "srl":
                 self._finish_srl_upload(tmp_zip, filename, namespace, name_override)
             else:
                 self._send_json({"ok": False,
-                                 "error": "could not detect an SR Linux (.bin) or SR OS "
-                                          "(7750 TiMOS) image inside the zip"}, 400)
+                                 "error": "could not detect an SR Linux (.bin), SR OS 7750 "
+                                          "TiMOS, or SR-SIM (srsim.tar.xz) image inside the "
+                                          "zip"}, 400)
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -713,6 +862,65 @@ class Handler(BaseHTTPRequestHandler):
                          "fileCount": len(extracted), "sizeBytes": total,
                          "yangCreated": bool(yang_meta), "note": note})
 
+    # ---------------------- SR-SIM (SR OS simulator container image) ----------------------
+
+    def _finish_srsim_upload(self, tmp_zip, filename, namespace, name_override):
+        """SR-SIM: unpack srsim.tar.xz into an OCI layout on the PVC (served from
+        our /v2 endpoint -- eda-cx pulls it by tag, no eda-asvr Artifact), then
+        best-effort resolve the SR OS YANG schema profile so the emitted sim
+        NodeProfile carries a working yang: URL. Name drives the served repo path
+        and the NodeProfile name; kept lowercase."""
+        display_name = (name_override or uploads.derive_name(filename)).strip().lower()
+        artifact_name = uploads.to_k8s_name(display_name)
+        if not artifact_name:
+            self._send_json({"ok": False, "error": "could not derive a valid image name"}, 400)
+            return
+        image_dir = os.path.join(UPLOAD_DIR, artifact_name)
+        if os.path.isfile(os.path.join(image_dir, "meta.json")):
+            self._send_json({"ok": False,
+                             "error": f"An image named '{display_name}' already exists. "
+                                      f"Delete it first to replace it."}, 409)
+            return
+        shutil.rmtree(image_dir, ignore_errors=True)
+        os.makedirs(image_dir, exist_ok=True)
+        try:
+            oci = uploads.extract_srsim_image(tmp_zip, image_dir)
+        except uploads.BadZip as e:
+            shutil.rmtree(image_dir, ignore_errors=True)
+            self._send_json({"ok": False, "error": f"could not read the SR-SIM image: {e}"}, 400)
+            return
+        except Exception as e:  # noqa: BLE001 - never leave a partial OCI layout on the PVC
+            shutil.rmtree(image_dir, ignore_errors=True)
+            logger.warning("SR-SIM extract failed for %s: %s", artifact_name, e)
+            self._send_json({"ok": False, "error": f"failed to unpack the SR-SIM image: {e}"}, 500)
+            return
+        # YANG schema profile (best-effort, via eda-asvr) so the NodeProfile's
+        # required yang: field has a working URL. Same resolver as SR OS HW.
+        version = oci.get("version") or ""
+        yang_meta = None
+        base_url = CONFIG.get("filePullBaseUrl") or artifact.default_base_url(POD_NAMESPACE)
+        try:
+            if version:
+                yfn, _src = schemaprofile.resolve_yang("sros", version, image_dir)
+                if yfn:
+                    ok, yang_meta = self._create_yang_artifact(namespace, artifact_name,
+                                                               artifact_name + "-yang", yfn, base_url)
+                    if not ok:
+                        yang_meta = None
+        except Exception as e:  # noqa: BLE001 - YANG is best-effort, never abort the image
+            logger.warning("SR-SIM YANG handling failed for %s: %s", artifact_name, e)
+            yang_meta = None
+        uploads.finalize_srsim(artifact_name, display_name, namespace, oci, yang_meta)
+        container_image = f"{sim_registry_host()}/{artifact_name}:{oci.get('tag')}"
+        logger.info("SR-SIM upload complete: %s (%d bytes, tag %s, yang=%s) -> /v2/%s",
+                    display_name, oci.get("sizeBytes") or 0, oci.get("tag"),
+                    bool(yang_meta), artifact_name)
+        self._send_json({"ok": True, "uploadId": artifact_name, "artifactName": artifact_name,
+                         "displayName": display_name, "namespace": namespace, "nos": "srsim",
+                         "version": version, "imageTag": oci.get("tag"),
+                         "containerImage": container_image,
+                         "sizeBytes": oci.get("sizeBytes"), "yangCreated": bool(yang_meta)})
+
 
 _VER_RE = re.compile(r"(\d+\.\d+\.[A-Za-z]?\d+(?:-\d+)?)")
 
@@ -901,6 +1109,142 @@ def _group_row(m, status_by_key):
     }
 
 
+def _sim_nodeprofile_yaml(version, namespace, prof_name, container_image, yang_url):
+    """A complete, copy-ready SR OS *simulator* NodeProfile: containerImage points
+    at this app's /v2 endpoint, plus a dummy license ConfigMap. <…> values are for
+    the operator to set."""
+    license_cm = "sros-sim-license"
+    L = [
+        "apiVersion: core.eda.nokia.com/v1",
+        "kind: NodeProfile",
+        "metadata:",
+        f"  name: {prof_name}",
+        f"  namespace: {namespace}",
+        "  labels:",
+        '    eda.nokia.com/bootstrap: "true"',
+        "spec:",
+        "  operatingSystem: sros",
+        f"  version: {version}",
+        f"  containerImage: {container_image}",
+        "  imagePullSecret: core      # a Secret in eda-system (where sims run); 'core' exists "
+        "and works — this registry is anonymous, so its contents are unused",
+        f"  license: {license_cm}      # ConfigMap below (an SR-SIM sim boots on an empty license)",
+    ]
+    if yang_url:
+        L.append(f"  yang: {yang_url}")
+    else:
+        L.append("  # yang: https://eda-asvr.eda-system.svc/<ns>/schemaprofiles/<p>/<p>.zip"
+                 "   # add the matching SR OS schema profile")
+    L += [
+        "  nodeUser: admin",
+        "  onboardingUsername: admin",
+        "  onboardingPassword: NokiaSrl1!",
+        "  dhcp:",
+        "    managementPoolv4: <your-ipv4-mgmt-pool>",
+        "---",
+        "# License ConfigMap referenced above. The Digital Twin SR-SIM accepts an",
+        "# empty dummy license; supply a real key only if your image requires one.",
+        "apiVersion: v1",
+        "kind: ConfigMap",
+        "metadata:",
+        f"  name: {license_cm}",
+        "  namespace: eda-system",
+        "data:",
+        '  license.key: ""',
+    ]
+    return "\n".join(L)
+
+
+def _sim_setup_note(container_image, namespace, prof_name):
+    """One-time, per-cluster instructions: teach the node's containerd to pull
+    from this app's registry, plus a topology to launch the sim."""
+    host = sim_registry_host()
+    return "\n".join([
+        "ONE-TIME SETUP (per cluster) — let the node pull this image",
+        "EDA's Digital Twin (eda-cx) starts the sim with the node's container",
+        f"runtime, which must be told how to reach Image Manager's registry. Add a",
+        f"Talos registry mirror for host '{host}' that points at the eda-imagemanager",
+        "Service (ClusterIP:8443):",
+        "",
+        "  machine:",
+        "    registries:",
+        "      mirrors:",
+        f"        {host}:",
+        "          endpoints:",
+        "            - https://<eda-imagemanager-ClusterIP>:8443",
+        "      config:",
+        f"        {host}:",
+        "          tls:",
+        "            insecureSkipVerify: true   # in-cluster internal-CA serving cert",
+        "",
+        "  # ClusterIP: kubectl -n eda-system get svc eda-imagemanager -o jsonpath='{.spec.clusterIP}'",
+        "  # apply with no reboot: talosctl -n <node> patch mc -p @mirror.json --mode=no-reboot",
+        "",
+        "LAUNCH A SIM NODE — apply the NodeProfile above, then a topology:",
+        "",
+        "apiVersion: topologies.eda.nokia.com/v1",
+        "kind: NetworkTopology",
+        "metadata:",
+        "  name: srsim-demo",
+        f"  namespace: {namespace}",
+        "spec:",
+        "  operation: Create",
+        "  nodeTemplates:",
+        "    - name: srsim",
+        f"      nodeProfile: {prof_name}",
+        '      platform: "7750 SR-1"',
+        "  nodes:",
+        "    - name: srsim1",
+        "      template: srsim",
+        "",
+        "NOTES",
+        f"- A NodeUser named 'admin' must exist in namespace '{namespace}' (referenced by the profile).",
+        "- imagePullSecret must name a Secret that exists in eda-system (where the sim pod runs);",
+        "  eda-cx requires the field, but this anonymous registry never uses its contents. The",
+        "  built-in 'core' secret works.",
+    ])
+
+
+def _srsim_row(m, status_by_key):
+    """Tracked-list row for an SR-SIM container image. Served from our own /v2
+    endpoint (no eda-asvr Artifact), so it is Ready as soon as it is unpacked. The
+    Details popup yields a sim NodeProfile (containerImage) + the one-time node
+    registry-mirror setup."""
+    ns = m.get("namespace")
+    artifact_name = m.get("artifactName")
+    tag = m.get("imageTag") or m.get("version") or "latest"
+    version = m.get("version") or "<version>"
+    container_image = f"{sim_registry_host()}/{artifact_name}:{tag}"
+    yang = m.get("yang") or {}
+    yst = status_by_key.get((ns, yang.get("artifactName")), {}) if yang.get("artifactName") else {}
+    yang_url = yst.get("internalUrl", "") if yst.get("downloadStatus") == "Available" else ""
+    snippet = ("operatingSystem: sros\nversion: " + version
+               + "\ncontainerImage: " + container_image
+               + "\nimagePullSecret: core")
+    example = _sim_nodeprofile_yaml(version, ns, artifact_name or "my-sim-nodeprofile",
+                                    container_image, yang_url)
+    setup = _sim_setup_note(container_image, ns, artifact_name or "my-sim-nodeprofile")
+    return {
+        "uploadId": m.get("uploadId"),
+        "name": artifact_name,
+        "displayName": m.get("displayName") or artifact_name,
+        "namespace": ns,
+        "repo": "served by Image Manager (/v2)",
+        "filePath": "",
+        "sizeBytes": m.get("sizeBytes"),
+        "storedAt": m.get("storedAt"),
+        "downloadStatus": "Ready",
+        "statusReason": "",
+        "snippet": snippet,
+        "nodeProfileExample": example,
+        "setupNote": setup,
+        "nos": "srsim",
+        "containerImage": container_image,
+        "imageTag": tag,
+        "yangStatus": (yst.get("downloadStatus") if yang.get("artifactName") else None),
+    }
+
+
 def build_tracked_list():
     """Merge PVC upload metadata with live Artifact download status for the UI."""
     # one cluster-wide list call, indexed by (namespace, name)
@@ -915,7 +1259,9 @@ def build_tracked_list():
 
     out = []
     for m in uploads.list_meta():
-        if m.get("artifacts"):
+        if m.get("nos") == "srsim":
+            out.append(_srsim_row(m, status_by_key))
+        elif m.get("artifacts"):
             out.append(_group_row(m, status_by_key))
         else:
             out.append(_single_row(m, status_by_key))

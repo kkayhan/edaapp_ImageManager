@@ -25,11 +25,14 @@ On-disk layout (the PVC is the source of truth for uploaded bytes):
                                                  storedAt}
 """
 
+import hashlib
 import json
 import logging
+import lzma
 import os
 import re
 import shutil
+import tarfile
 import zipfile
 from datetime import datetime, timezone
 
@@ -58,26 +61,35 @@ def _trim_write_cache(fileobj):
         pass
 
 
-def _copy_streaming(src, dst):
+def _copy_streaming(src, dst, hasher=None):
     """Copy src -> dst in _CHUNK blocks, trimming the write cache every
-    _FADV_EVERY bytes (and once at the end) so a large copy stays memory-flat."""
+    _FADV_EVERY bytes (and once at the end) so a large copy stays memory-flat.
+    If `hasher` is given (e.g. hashlib.sha256()), it is updated with every byte
+    written, so the caller can verify content integrity without a second read."""
     since = 0
+    total = 0
     while True:
         buf = src.read(_CHUNK)
         if not buf:
             break
         dst.write(buf)
+        if hasher is not None:
+            hasher.update(buf)
+        total += len(buf)
         since += len(buf)
         if since >= _FADV_EVERY:
             _trim_write_cache(dst)
             since = 0
     _trim_write_cache(dst)
+    return total
 
 
 # Recognize Nokia SR Linux image filenames (e.g.
 # "Nokia-7220_IXR_SR_Linux-<hw>-26.3.2.zip") and a semantic version in them.
 _SRLINUX_RE = re.compile(r"sr[ _-]?linux", re.I)
+_SRSIM_NAME_RE = re.compile(r"sr[ _-]?sim", re.I)  # e.g. "Nokia-SR-SIM-26.3.R3.zip"
 _VERSION_RE = re.compile(r"(\d+\.\d+\.\d+(?:-\d+)?)")
+_SROS_VER_RE = re.compile(r"(\d+\.\d+\.[Rr]\d+)")  # SR OS style, e.g. 26.3.R3
 
 # ----------------------------- SR OS (7750 TiMOS) -----------------------------
 # A 7750 SR OS vendor zip unpacks to cflash/TiMOS-SR-<ver>/{both.tim,cpm.tim,...}.
@@ -90,6 +102,18 @@ _VERSION_RE = re.compile(r"(\d+\.\d+\.\d+(?:-\d+)?)")
 SROS_TIM_FILES = ["boot.ldr", "both.tim", "cpm.tim", "iom.tim", "kernel.tim", "support.tim"]
 # e.g. "cflash/TiMOS-SR-26.3.R3/both.tim" -> 26.3.R3
 _SROS_DIR_RE = re.compile(r"TiMOS-[A-Za-z]+-(\d+\.\d+\.[Rr]\d+)")
+
+# ----------------------------- SR-SIM (SR OS simulator) -----------------------------
+# A Nokia SR-SIM vendor zip (Nokia-SR-SIM-<ver>.zip) unpacks to
+# vm/SR-Simulator/srsim.tar.xz -- an OCI/docker-save CONTAINER image archive
+# (RepoTags localhost/nokia/srsim:<ver>), NOT a node-bootable file. EDA's Digital
+# Twin (eda-cx) runs this image as the simulator pod, pulling it BY TAG from a
+# registry the node can reach. So we do NOT hand it to eda-asvr; instead we unpack
+# the OCI layout onto the PVC and serve it from our own read-only OCI /v2 endpoint
+# (see fileserver._serve_registry_v2), and emit a NodeProfile with containerImage.
+_SRSIM_MEMBER = "srsim.tar.xz"
+# tag in the archive, e.g. localhost/nokia/srsim:26.3.R3 -> 26.3.R3
+_SRSIM_TAG_RE = re.compile(r":([A-Za-z0-9._-]+)$")
 
 
 class UploadTooLarge(Exception):
@@ -112,6 +136,10 @@ def derive_name(filename):
     otherwise the filename with its extension stripped (lowercased)."""
     base = os.path.basename((filename or "").replace("\\", "/").strip())
     stem = re.sub(r"\.[A-Za-z0-9]+$", "", base)
+    if _SRSIM_NAME_RE.search(base):   # SR-SIM (container image) -> distinct from HW SR OS
+        m = _SROS_VER_RE.search(base) or _VERSION_RE.search(base)
+        if m:
+            return ("srsim-" + m.group(1)).lower()
     if _SRLINUX_RE.search(base):
         m = _VERSION_RE.search(base)
         if m:
@@ -182,9 +210,21 @@ def parse_md5sums(text):
     return by_path, by_base
 
 
+def _srsim_member(names):
+    """Return the srsim container-image archive member name in a zip, or None.
+    Matches basename 'srsim.tar.xz' (the SR-SIM vendor layout puts it under
+    vm/SR-Simulator/)."""
+    for n in names:
+        if os.path.basename(n).lower() == _SRSIM_MEMBER:
+            return n
+    return None
+
+
 def detect_nos_from_zip(zip_path):
-    """Classify a vendor zip by its contents: 'sros' (a 7750 TiMOS boot set under
-    cflash/TiMOS-<x>-<ver>/), 'srl' (an SR Linux .bin), or None (unrecognized).
+    """Classify a vendor zip by its contents: 'srsim' (an SR OS *simulator*
+    container image, vm/SR-Simulator/srsim.tar.xz), 'sros' (a 7750 TiMOS boot set
+    under cflash/TiMOS-<x>-<ver>/), 'srl' (an SR Linux .bin), or None.
+    SR-SIM is checked first: it is a container image, not an asvr file artifact.
     The TiMOS rules require a cflash/ ancestor so a stray .bin zip can't misfire."""
     try:
         zf = zipfile.ZipFile(zip_path)
@@ -192,6 +232,8 @@ def detect_nos_from_zip(zip_path):
         return None
     with zf:
         names = [m.filename for m in zf.infolist() if not m.is_dir()]
+    if _srsim_member(names):
+        return "srsim"
     if any("cflash/" in n and _SROS_DIR_RE.search(n) and os.path.basename(n) == "both.tim"
            for n in names):
         return "sros"
@@ -321,6 +363,178 @@ def extract_sros_images(zip_path, dest_dir):
     return version, extracted
 
 
+# ----------------------------- SR-SIM (container image) -----------------------------
+# An extracted OCI layout has these top-level files plus blobs/sha256/<digest>.
+_OCI_ALLOWED_TOP = {"index.json", "manifest.json", "oci-layout", "repositories"}
+_SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
+
+
+def extract_srsim_image(zip_path, dest_dir):
+    """Unpack the SR-SIM container image (vm/SR-Simulator/srsim.tar.xz) from a
+    vendor zip into an OCI layout under dest_dir, so our /v2 endpoint can serve it.
+
+    srsim.tar.xz is an OCI/docker-save archive (blobs/sha256/*, index.json,
+    manifest.json, oci-layout, repositories). We stream-decompress it (lzma) and
+    stream-extract each member (the layer blob is ~2 GB) with the same
+    fsync+fadvise discipline used elsewhere, so the pod stays memory-flat. Each
+    blob is hashed as it is written and checked against its sha256 filename, for
+    end-to-end integrity. Member paths are constrained to blobs/sha256/<hex> and a
+    small allow-list of top-level files (no path traversal).
+
+    Returns the _parse_oci_layout dict augmented with sizeBytes + blobCount.
+    Raises BadZip on any structural / integrity problem.
+    """
+    try:
+        zf = zipfile.ZipFile(zip_path)
+    except (zipfile.BadZipFile, OSError) as e:
+        raise BadZip("not a readable zip archive (%s)" % e)
+    blobs_dir = os.path.join(dest_dir, "blobs", "sha256")
+    os.makedirs(blobs_dir, exist_ok=True)
+    total = 0
+    blob_count = 0
+    with zf:
+        names = [m.filename for m in zf.infolist() if not m.is_dir()]
+        member = _srsim_member(names)
+        if not member:
+            raise BadZip("no srsim.tar.xz container image found in the zip")
+        info = zf.getinfo(member)
+        # Decompress + read errors (a corrupt or truncated .tar.xz -- e.g. a cut
+        # connection mid-upload of the ~2 GB layer) surface as LZMAError/EOFError/
+        # OSError/TarError; convert them all to BadZip so the caller cleans up and
+        # returns a 400, never a partial OCI layout + cryptic 500.
+        try:
+            with zf.open(info, "r") as zsrc, lzma.open(zsrc, "rb") as xz:
+                with tarfile.open(fileobj=xz, mode="r|") as tar:
+                    for m in tar:
+                        if not m.isfile():
+                            continue
+                        rel = m.name.lstrip("./")
+                        base = os.path.basename(rel)
+                        parent = os.path.dirname(rel).replace("\\", "/")
+                        src = tar.extractfile(m)
+                        if src is None:
+                            continue
+                        if parent == "blobs/sha256":
+                            if not _SHA256_HEX.match(base):
+                                continue  # ignore stray non-digest blobs
+                            out_path = os.path.join(blobs_dir, base)
+                            h = hashlib.sha256()
+                            with src, open(out_path, "wb") as out:
+                                total += _copy_streaming(src, out, hasher=h)
+                            if h.hexdigest() != base:
+                                raise BadZip("blob %s… failed sha256 integrity check" % base[:16])
+                            blob_count += 1
+                        elif rel in _OCI_ALLOWED_TOP:
+                            with src, open(os.path.join(dest_dir, base), "wb") as out:
+                                total += _copy_streaming(src, out)
+                        else:
+                            src.close()  # ignore anything else (no path traversal)
+        except BadZip:
+            raise
+        except (lzma.LZMAError, EOFError, OSError, tarfile.TarError) as e:
+            raise BadZip("could not decompress/read srsim.tar.xz (%s)" % e)
+    try:
+        os.remove(zip_path)
+    except OSError:
+        pass
+    if blob_count == 0:
+        raise BadZip("the srsim image archive contained no blobs")
+    info_d = _parse_oci_layout(dest_dir)
+    # Fail closed on a structurally incomplete image (would 404 later at the node
+    # pull): the manifest blob the index points at must be present, and the
+    # manifest must list a config + at least one layer.
+    mh = (info_d.get("manifestDigest") or "").split(":")[-1]
+    if not (mh and os.path.isfile(os.path.join(blobs_dir, mh))):
+        raise BadZip("the image manifest blob is missing from the archive")
+    if not info_d.get("configDigest") or not info_d.get("layerDigests"):
+        raise BadZip("the image manifest lists no config/layers (incomplete image)")
+    info_d["sizeBytes"] = total
+    info_d["blobCount"] = blob_count
+    logger.info("Extracted SR-SIM image %s (%d blobs, %d bytes, tag %s)",
+                (info_d.get("manifestDigest") or "?")[:19], blob_count, total, info_d.get("tag"))
+    return info_d
+
+
+def _parse_oci_layout(dest_dir):
+    """Read index.json (with manifest.json as a fallback) from an extracted OCI
+    layout to find the image manifest digest, its mediaType and the tag. Returns
+    {tag, version, manifestDigest, manifestMediaType, configDigest, layerDigests,
+    repoTag}. Raises BadZip if the layout is unusable."""
+    idx_path = os.path.join(dest_dir, "index.json")
+    try:
+        with open(idx_path) as f:
+            idx = json.load(f)
+    except (OSError, ValueError) as e:
+        raise BadZip("missing/invalid index.json in the image (%s)" % e)
+    manifests = idx.get("manifests") or []
+    if not manifests:
+        raise BadZip("the image index lists no manifests")
+    md = manifests[0]
+    manifest_digest = md.get("digest") or ""
+    manifest_mt = md.get("mediaType") or "application/vnd.oci.image.manifest.v1+json"
+    tag = (md.get("annotations") or {}).get("org.opencontainers.image.ref.name") or ""
+    repo_tag = ""
+    try:
+        with open(os.path.join(dest_dir, "manifest.json")) as f:
+            mj = json.load(f)
+        if isinstance(mj, list) and mj:
+            rts = mj[0].get("RepoTags") or []
+            if rts:
+                repo_tag = rts[0]
+                if not tag:
+                    mt = _SRSIM_TAG_RE.search(repo_tag)
+                    tag = mt.group(1) if mt else ""
+    except (OSError, ValueError):
+        pass
+    if not manifest_digest or not tag:
+        raise BadZip("could not determine the image manifest digest / tag")
+    config_digest, layer_digests = "", []
+    try:
+        h = manifest_digest.split(":", 1)[1]
+        with open(os.path.join(dest_dir, "blobs", "sha256", h)) as f:
+            man = json.load(f)
+        config_digest = (man.get("config") or {}).get("digest", "")
+        layer_digests = [ly.get("digest", "") for ly in (man.get("layers") or [])]
+    except (OSError, ValueError, IndexError):
+        pass
+    return {"tag": tag, "version": tag.lower(), "manifestDigest": manifest_digest,
+            "manifestMediaType": manifest_mt, "configDigest": config_digest,
+            "layerDigests": layer_digests, "repoTag": repo_tag}
+
+
+def finalize_srsim(artifact_name, display_name, namespace, oci, yang=None):
+    """Write meta.json for an SR-SIM container-image upload (nos='srsim'). The
+    image is served from our own /v2 endpoint (no eda-asvr Artifact); `oci` is the
+    dict from extract_srsim_image; `yang` optionally records a schema-profile
+    Artifact when one was resolved."""
+    meta = {
+        "uploadId": artifact_name,
+        "artifactName": artifact_name,
+        "displayName": display_name,
+        "nos": "srsim",
+        "namespace": namespace,
+        "version": oci.get("version"),
+        "imageTag": oci.get("tag"),
+        "manifestDigest": oci.get("manifestDigest"),
+        "manifestMediaType": oci.get("manifestMediaType"),
+        "sizeBytes": oci.get("sizeBytes"),
+        "yang": yang or None,
+        "storedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    return rewrite_meta(artifact_name, meta)
+
+
+def srsim_meta(artifact_name):
+    """Return (meta, blobs_dir) for an extracted SR-SIM image if `artifact_name`
+    names one on the PVC, else (None, None). Used by the /v2 registry endpoint."""
+    if not artifact_name or "/" in artifact_name or "\\" in artifact_name or ".." in artifact_name:
+        return None, None
+    m = read_meta(artifact_name)
+    if not m or m.get("nos") != "srsim":
+        return None, None
+    return m, os.path.join(DATA_DIR, artifact_name, "blobs", "sha256")
+
+
 def stream_upload(rfile, content_length, dest_path, max_bytes):
     """
     Stream `content_length` bytes from rfile into dest_path in fixed-size chunks
@@ -447,11 +661,16 @@ def list_meta():
 def upload_dir_size(upload_id):
     total = 0
     d = os.path.join(DATA_DIR, upload_id)
+    # Recurse: SR-SIM images keep their bytes under blobs/sha256/ (a subdir).
     try:
-        for name in os.listdir(d):
-            fp = os.path.join(d, name)
-            if os.path.isfile(fp):
-                total += os.path.getsize(fp)
+        for root, _dirs, files in os.walk(d):
+            for name in files:
+                fp = os.path.join(root, name)
+                try:
+                    if os.path.isfile(fp):
+                        total += os.path.getsize(fp)
+                except OSError:
+                    pass
     except FileNotFoundError:
         pass
     return total
