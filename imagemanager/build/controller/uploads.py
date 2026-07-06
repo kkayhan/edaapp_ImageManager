@@ -672,6 +672,33 @@ def stream_upload(rfile, content_length, dest_path, max_bytes):
     return written
 
 
+def stream_download(rfile, dest_path, max_bytes, content_length=None):
+    """Stream an HTTP(S) response body into dest_path until EOF, using the same
+    OOM-safe page-cache trimming as stream_upload (fsync + POSIX_FADV_DONTNEED
+    every _FADV_EVERY bytes). Unlike stream_upload this reads to EOF, so it also
+    works when the server sends no Content-Length. Enforces max_bytes. Returns
+    bytes written."""
+    if max_bytes and content_length and content_length > max_bytes:
+        raise UploadTooLarge(f"declared size {content_length} exceeds limit {max_bytes}")
+    written = 0
+    last_trim = 0
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    with open(dest_path, "wb") as out:
+        while True:
+            chunk = rfile.read(_CHUNK)
+            if not chunk:
+                break
+            out.write(chunk)
+            written += len(chunk)
+            if max_bytes and written > max_bytes:
+                raise UploadTooLarge(f"download exceeded limit {max_bytes}")
+            if written - last_trim >= _FADV_EVERY:
+                _trim_write_cache(out)
+                last_trim = written
+        _trim_write_cache(out)
+    return written
+
+
 def finalize_upload(upload_id, filename, md5, repo, file_path, namespace,
                     size_bytes, artifact_name, display_name, md5_artifact_name=""):
     """Write meta.json (and a .md5 sidecar only if the user supplied a checksum)."""

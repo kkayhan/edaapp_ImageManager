@@ -14,6 +14,7 @@ No Keycloak / EDA REST API is used.
 import json
 import logging
 import ssl
+import time
 import urllib.error
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
@@ -24,6 +25,8 @@ _K8S_BASE = "https://kubernetes.default.svc"
 _SA_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 _SA_CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 _TIMEOUT = 30
+_RETRYABLE_HTTP = frozenset({429, 500, 502, 503, 504})
+_MAX_RETRIES = 4
 
 
 def _ssl_ctx():
@@ -35,26 +38,48 @@ def _token():
         return f.read().strip()
 
 
+def _retry_delay(attempt, err):
+    """Backoff for transient API errors (429 storage init, 503 overload)."""
+    delay = 1
+    try:
+        payload = json.loads(err.read().decode("utf-8", errors="replace"))
+        delay = int((payload.get("details") or {}).get("retryAfterSeconds", delay))
+    except Exception:
+        pass
+    return min(max(delay, 1), 8) * (attempt + 1)
+
+
 def _request(method, path, body=None):
     url = _K8S_BASE + path
     data = json.dumps(body).encode("utf-8") if body is not None else None
-    req = Request(url=url, data=data, method=method)
-    req.add_header("Authorization", f"Bearer {_token()}")
-    req.add_header("Accept", "application/json")
-    if data:
-        req.add_header("Content-Type", "application/json")
-    try:
-        with urlopen(req, context=_ssl_ctx(), timeout=_TIMEOUT) as resp:
-            raw = resp.read()
-            return json.loads(raw.decode("utf-8")) if raw else None
-    except urllib.error.HTTPError as e:
-        body_text = ""
+    last_err = None
+    for attempt in range(_MAX_RETRIES):
+        req = Request(url=url, data=data, method=method)
+        req.add_header("Authorization", f"Bearer {_token()}")
+        req.add_header("Accept", "application/json")
+        if data:
+            req.add_header("Content-Type", "application/json")
         try:
-            body_text = e.read().decode("utf-8", errors="replace")[:500]
-        except Exception:
-            pass
-        logger.warning("K8s API %s %s -> HTTP %d: %s", method, path, e.code, body_text)
-        raise
+            with urlopen(req, context=_ssl_ctx(), timeout=_TIMEOUT) as resp:
+                raw = resp.read()
+                return json.loads(raw.decode("utf-8")) if raw else None
+        except urllib.error.HTTPError as e:
+            last_err = e
+            if e.code in _RETRYABLE_HTTP and attempt < _MAX_RETRIES - 1:
+                wait = _retry_delay(attempt, e)
+                logger.info("K8s API %s %s -> HTTP %d; retry in %ss (%d/%d)",
+                            method, path, e.code, wait, attempt + 1, _MAX_RETRIES)
+                time.sleep(wait)
+                continue
+            body_text = ""
+            try:
+                body_text = e.read().decode("utf-8", errors="replace")[:500]
+            except Exception:
+                pass
+            logger.warning("K8s API %s %s -> HTTP %d: %s", method, path, e.code, body_text)
+            raise
+    if last_err is not None:
+        raise last_err
 
 
 # ----------------------------- cluster-scoped CR (ImageManagerConfig) --------------

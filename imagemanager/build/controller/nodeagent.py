@@ -46,8 +46,9 @@ POD_NAMESPACE = os.environ.get("POD_NAMESPACE", "eda-system")
 # The DaemonSet mounts the node's containerd config dir here (read-write).
 HOST_ROOT = os.environ.get("HOST_ROOT", "/host")
 CONTAINERD_DIR = os.environ.get("CONTAINERD_DIR", "/etc/containerd")
-RESYNC_SECONDS = int(os.environ.get("RESYNC_SECONDS", "60"))
+RESYNC_SECONDS = int(os.environ.get("RESYNC_SECONDS", "120"))
 HEARTBEAT_FILE = os.environ.get("HEARTBEAT_FILE", "/tmp/.heartbeat")
+ENABLED = os.environ.get("NODE_AGENT_ENABLED", "true").lower() not in ("0", "false", "no")
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s")
@@ -190,15 +191,46 @@ def reconcile():
     return path
 
 
+def cleanup():
+    """Remove the registry redirect written by this agent (SIGTERM cleanup).
+
+    Keeps reinstall clean: a stale hosts.toml redirect left on a node can block
+    a later SR-SIM pull after the app is reinstalled.
+    """
+    certs_dir = detect_certs_dir()
+    if not certs_dir:
+        return
+    path = os.path.join(certs_dir, registry_host(), "hosts.toml")
+    try:
+        os.remove(path)
+        log.info("removed registry redirect %s", path)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        log.warning("could not remove %s: %s", path, e)
+
+
 def main():
+    import signal
+
+    def _handle_signal(signum, frame):
+        log.info("received signal %s, cleaning up", signum)
+        cleanup()
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
     log.info("node registry-trust agent starting (host=%s ns=%s port=%s "
-             "resync=%ss)", registry_host(), POD_NAMESPACE, REGISTRY_PORT,
-             RESYNC_SECONDS)
+             "resync=%ss enabled=%s)", registry_host(), POD_NAMESPACE,
+             REGISTRY_PORT, RESYNC_SECONDS, ENABLED)
+    if not ENABLED:
+        log.info("NODE_AGENT_ENABLED=false; idle heartbeat only (no hosts.toml writes)")
     while True:
-        try:
-            reconcile()
-        except Exception as e:   # never let the reconcile loop die
-            log.error("reconcile error: %s", e)
+        if ENABLED:
+            try:
+                reconcile()
+            except Exception as e:   # never let the reconcile loop die
+                log.error("reconcile error: %s", e)
         try:
             with open(HEARTBEAT_FILE, "w") as f:
                 f.write(str(int(time.time())))

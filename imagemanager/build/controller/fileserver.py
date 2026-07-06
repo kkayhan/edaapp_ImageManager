@@ -26,6 +26,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.request
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
@@ -44,6 +45,7 @@ HEALTHZ_FILE = os.path.join(UPLOAD_DIR, ".healthz.json")
 PROXY_PREFIX = "/core/httpproxy/v1/imagemanager"
 TLS_DIR = "/var/run/eda/tls/serving"
 _SERVE_CHUNK = 256 * 1024
+_IMPORT_TIMEOUT = 60  # per-socket-op timeout (s) for URL imports
 
 # Shared, set by main each reconcile cycle (dict assignment is atomic in CPython).
 CONFIG = {
@@ -71,6 +73,13 @@ def sim_registry_host():
     machine.registries mirror maps this host to the in-cluster Service. Used as
     the host in a SR-SIM NodeProfile's containerImage."""
     return f"{SERVICE_NAME}.{POD_NAMESPACE}.svc"
+
+
+def _filename_from_url(url):
+    """Best-effort filename from a URL path (for display / sanitizing only)."""
+    base = os.path.basename(unquote(urlsplit(url).path))
+    return base or "import.zip"
+
 
 # Material-styled standalone message page (sign-out / access-denied). Mirrors the
 # EDA palette + the saved Light/Dark preference used by the main UI.
@@ -510,6 +519,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/upload":
                 self._handle_upload(q)
+            elif path == "/api/import-url":
+                self._handle_import_url(q)
             elif path == "/api/license":
                 self._handle_license(q)
             elif path == "/api/delete":
@@ -761,6 +772,75 @@ class Handler(BaseHTTPRequestHandler):
                                  "error": "could not detect an SR Linux (.bin), SR OS 7750 "
                                           "TiMOS, or SR-SIM (srsim.tar.xz) image inside the "
                                           "zip"}, 400)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def _handle_import_url(self, q):
+        """Import an image from a URL. Downloads the vendor .zip to a temp area
+        (OOM-safe streaming, the same page-cache trim as a browser upload), then
+        runs the SAME NOS-detection + _finish_* path. No new CRD and no new RBAC:
+        the bytes land on the PVC and become Artifacts exactly like an upload."""
+        def one(name, default=None):
+            v = q.get(name, [default])
+            return v[0] if v else default
+
+        url = (one("url") or "").strip()
+        namespace = (one("namespace") or "").strip()
+        name_override = (one("name") or "").strip()
+        if not (url.startswith("http://") or url.startswith("https://")):
+            self._send_json({"ok": False, "error": "a valid http(s) URL is required"}, 400)
+            return
+        if not namespace:
+            self._send_json({"ok": False, "error": "namespace is required"}, 400)
+            return
+        filename = uploads.sanitize_filename(one("filename", "") or _filename_from_url(url))
+        if not filename.lower().endswith(".zip"):
+            filename = filename + ".zip"
+        max_bytes = int(CONFIG.get("maxUploadMiB", 4096)) * 1024 * 1024
+
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+        tmp_dir = tempfile.mkdtemp(dir=UPLOAD_DIR, prefix=".import-")
+        try:
+            tmp_zip = os.path.join(tmp_dir, "import.zip")
+            try:
+                req = urllib.request.Request(
+                    url, method="GET", headers={"User-Agent": "eda-imagemanager"})
+                with urllib.request.urlopen(req, timeout=_IMPORT_TIMEOUT) as resp:
+                    try:
+                        clen = int(resp.headers.get("Content-Length", "0"))
+                    except (TypeError, ValueError):
+                        clen = 0
+                    if max_bytes and clen and clen > max_bytes:
+                        self._send_json({"ok": False,
+                                         "error": f"remote file is {clen} bytes, over the "
+                                                  f"{max_bytes}-byte limit"}, 413)
+                        return
+                    uploads.stream_download(resp, tmp_zip, max_bytes, clen)
+            except uploads.UploadTooLarge as e:
+                self._send_json({"ok": False, "error": f"download too large: {e}"}, 413)
+                return
+            except urllib.error.HTTPError as e:
+                self._send_json({"ok": False,
+                                 "error": f"the server returned HTTP {e.code} for {url}"}, 502)
+                return
+            except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+                self._send_json({"ok": False, "error": f"could not fetch {url}: {e}"}, 502)
+                return
+            if not uploads.looks_like_zip(tmp_zip):
+                self._send_json({"ok": False,
+                                 "error": "the downloaded file is not a valid .zip archive"}, 400)
+                return
+            nos = uploads.detect_nos_from_zip(tmp_zip)
+            if nos == "srsim":
+                self._finish_srsim_upload(tmp_zip, filename, namespace, name_override)
+            elif nos == "sros":
+                self._finish_sros_upload(tmp_dir, tmp_zip, namespace, name_override)
+            elif nos == "srl":
+                self._finish_srl_upload(tmp_zip, filename, namespace, name_override)
+            else:
+                self._send_json({"ok": False,
+                                 "error": "could not detect an SR Linux (.bin), SR OS 7750 "
+                                          "TiMOS, or SR-SIM image inside the downloaded zip"}, 400)
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 

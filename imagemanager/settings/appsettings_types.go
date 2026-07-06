@@ -32,6 +32,15 @@ type AppSettingsSpec struct {
 	// +kubebuilder:default="system-administrator"
 	// +eda:ui:title="Allowed EDA role(s)"
 	AllowedRoles string `json:"allowedRoles,omitempty"`
+
+	// NodeAgentEnabled deploys the per-node DaemonSet that writes containerd
+	// registry-hosts redirects for SR-SIM image pulls. Set false for labs that
+	// only upload SR Linux / SR OS hardware images (DaemonSet stays running but
+	// skips hosts.toml writes; scale to 0 for zero node pods). On Talos the agent
+	// cannot write the immutable containerd config anyway, so false is sensible there.
+	// +kubebuilder:default="true"
+	// +eda:ui:title="Enable SR-SIM node agent"
+	NodeAgentEnabled string `json:"nodeAgentEnabled,omitempty"`
 }
 
 // +kubebuilder:object:root=true

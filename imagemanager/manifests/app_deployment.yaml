@@ -3,8 +3,13 @@ kind: Deployment
 metadata:
   name: eda-imagemanager
   namespace: eda-system
+  labels:
+    eda.nokia.com/app: eda-imagemanager
+    eda.nokia.com/app-group: control-plane
 spec:
   replicas: 1
+  progressDeadlineSeconds: 600
+  revisionHistoryLimit: 2
   strategy:
     type: Recreate
   selector:
@@ -19,21 +24,21 @@ spec:
         eda.nokia.com/app-group: control-plane
     spec:
       serviceAccountName: eda-imagemanager
-      imagePullSecrets:
-        - name: ghcr-imagemanager
       terminationGracePeriodSeconds: 30
       securityContext:
         fsGroup: 65534
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: imagemanager-controller
-          image: ghcr.io/kkayhan/edaapp_imagemanager/imagemanager-controller:v26.4.2-26
+          image: ghcr.io/kkayhan/edaapp_imagemanager/imagemanager-controller:v26.4.2-27
           imagePullPolicy: IfNotPresent
           env:
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: RECONCILE_INTERVAL
+              value: "60"
             - name: ALLOWED_ROLES
               value: "system-administrator" # app-set: ${allowedRoles}
           ports:
@@ -60,6 +65,12 @@ spec:
               port: serving
               scheme: HTTPS
             periodSeconds: 10
+          # preStop delay lets the Service drop this endpoint before the process
+          # exits, so the HttpProxy stops routing here during a Recreate rollout.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 5"]
           volumeMounts:
             - name: upload-data
               mountPath: /data

@@ -36,6 +36,12 @@
           "title": "Controller memory limit",
           "default": "512Mi"
         },
+        "nodeAgentEnabled": {
+          "description": "NodeAgentEnabled deploys the per-node DaemonSet that writes containerd\nregistry-hosts redirects for SR-SIM image pulls. Set false for labs that\nonly upload SR Linux / SR OS hardware images (DaemonSet stays running but\nskips hosts.toml writes; scale to 0 for zero node pods).",
+          "type": "string",
+          "title": "Enable SR-SIM node agent",
+          "default": "true"
+        },
         "uploadStorageSize": {
           "description": "Size of the persistent volume that stores uploaded images before eda-asvr\nre-hosts them (Kubernetes quantity, e.g. \"20Gi\"). Set this large enough to\nhold the images you intend to upload concurrently.",
           "type": "string",

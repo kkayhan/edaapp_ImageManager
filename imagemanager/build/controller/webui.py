@@ -357,11 +357,17 @@ INDEX_HTML = r"""<!DOCTYPE html>
   <h2 class="dialog-title" id="dlgTitle">Upload image</h2>
   <div class="dialog-body">
     <div class="filefield">
-      <span class="lbl">Vendor image &mdash; <span class="mono">.zip</span> (required)</span>
+      <span class="lbl">Vendor image &mdash; <span class="mono">.zip</span> (file or URL below)</span>
       <div class="filebox">
         <input type="file" id="binFile" accept=".zip">
       </div>
       <div class="helper" id="binHint"></div>
+    </div>
+
+    <div class="tf" style="margin-top:2px">
+      <input type="text" id="importUrl" placeholder=" " autocomplete="off" spellcheck="false">
+      <label for="importUrl">&hellip; or paste an image URL (optional)</label>
+      <div class="helper">Leave the file box empty and paste a direct <span class="mono">https://</span> link to a vendor <span class="mono">.zip</span>; the controller downloads it server-side and creates the Artifacts. Use a file <b>or</b> a URL, not both.</div>
     </div>
 
     <div class="tf select">
@@ -438,7 +444,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
   var el = function(id){ return document.getElementById(id); };
   var binFile=el("binFile"), ns=el("namespace"), imageName=el("imageName"),
-      btn=el("uploadBtn"), binHint=el("binHint"), rows=el("rows"), licText=el("licText");
+      btn=el("uploadBtn"), binHint=el("binHint"), rows=el("rows"), licText=el("licText"),
+      importUrl=el("importUrl");
 
   // Lenient structure check: does ANY single line contain a "<node-id> <key>"
   // entry? Surrounding labels / quotes / blank lines don't matter. Tested per-line
@@ -575,7 +582,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
   // ---------- upload (closes dialog; progress shown as a live table row) ----------
   function resetUploadForm(){
-    binFile.value=""; imageName.value=""; ns.selectedIndex=0; licText.value="";
+    binFile.value=""; imageName.value=""; ns.selectedIndex=0; licText.value=""; if(importUrl) importUrl.value="";
     binHint.textContent="Maximum upload size: "+Math.round(maxBytes/1048576)+" MiB.";
   }
 
@@ -662,18 +669,50 @@ INDEX_HTML = r"""<!DOCTYPE html>
     });
   }
 
+  // URL import: the controller downloads the zip server-side (no browser upload
+  // progress bar), then runs the SAME detect + finish path as a file upload.
+  function doImportUrl(url, namespace, lic){
+    var guessFn=(url.split(/[?#]/)[0].split(/[\\/]/).pop())||"import.zip";
+    var name=(imageName.value||deriveName(guessFn)).trim().toLowerCase();
+    var qs=new URLSearchParams({ url:url, namespace:namespace, name:name });
+    var key="u"+(++uploadSeq);
+    var p={ key:key, displayName:name, namespace:namespace, total:null, isZip:true,
+            phase:"Downloading", loaded:0, pct:0, speed:0, elapsed:0 };
+    pendingUploads[key]=p; closeModal(); resetUploadForm(); render();
+    var xhr=new XMLHttpRequest();
+    xhr.open("POST", api("/api/import-url")+"?"+qs.toString());
+    xhr.onload=function(){ var r={}; try{ r=JSON.parse(xhr.responseText);}catch(e){}
+      if(xhr.status>=200 && xhr.status<300 && r.ok){
+        delete pendingUploads[key];
+        var what=(r.displayName||name), msg;
+        if(r.nos==="srsim") msg="Imported "+what+" — SR-SIM image ready. Open Details for the sim NodeProfile.";
+        else if(r.nos==="sros") msg="Imported "+what+" — "+(r.fileCount||0)+" image files. "+(r.note||"");
+        else msg="Imported "+what+"."+(r.md5?(" md5 "+r.md5+"."):"")+(r.yangCreated?" YANG profile attached.":"");
+        if(lic){ attachLicense(r.artifactName||r.uploadId||name, what, lic, msg); }
+        else { snack("ok", msg); refresh(); }
+      } else { delete pendingUploads[key]; render();
+        snack("err",(r.error||("HTTP "+xhr.status)), true); if(r.uploadId) refresh(); }
+    };
+    xhr.onerror=function(){ delete pendingUploads[key]; render();
+      snack("err","Network error starting the URL import.", true); };
+    xhr.send();
+  }
+
   btn.addEventListener("click", function(){
     var f=binFile.files[0];
-    // Validate first; on failure keep the dialog open so the user can fix it.
-    if(!f){ snack("err","Select a vendor .zip file first."); return; }
-    if(!isZip(f.name)){ snack("err","Only vendor .zip images are supported (SR Linux or SR OS)."); return; }
-    if(f.size>maxBytes){ snack("err","File is "+fmtBytes(f.size)+", over the "+fmtBytes(maxBytes)+" limit."); return; }
+    var url=(importUrl.value||"").trim();
+    // Either a local file OR a URL — validate whichever was provided.
+    if(!f && !url){ snack("err","Select a vendor .zip file, or paste an image URL."); return; }
+    if(f && url){ snack("err","Provide a file OR a URL, not both."); return; }
+    if(f && !isZip(f.name)){ snack("err","Only vendor .zip images are supported (SR Linux or SR OS)."); return; }
+    if(f && f.size>maxBytes){ snack("err","File is "+fmtBytes(f.size)+", over the "+fmtBytes(maxBytes)+" limit."); return; }
+    if(url && !/^https?:\/\//i.test(url)){ snack("err","The URL must start with http:// or https://."); return; }
     var namespace=(ns.value||"").trim();
     if(!namespace){ snack("err","Choose a namespace first."); return; }
     var lic=(licText.value||"").trim();   // optional pasted license key
     if(lic && lic.length>262144){ snack("err","License text is too large (expected a small key)."); return; }
     if(lic && !looksLikeLicense(lic)){ snack("err","That doesn't look like a license key — paste the full “<node-id> <key>” line (extra spaces, quotes or a label are fine)."); return; }
-    doUpload(f, namespace, lic);
+    if(url){ doImportUrl(url, namespace, lic); } else { doUpload(f, namespace, lic); }
   });
 
   // ---------- artifacts table ----------
@@ -690,9 +729,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
              '<div class="uprog"><div style="width:'+p.pct.toFixed(1)+'%"></div></div>'+
              '<div class="upinfo">'+esc(line)+'</div>';
     }
-    var label = p.phase==="Unzipping" ? "Un-zipping" : "Finalizing";
-    var sub   = p.phase==="Unzipping" ? "extracting image + reading md5" : "creating Artifact";
-    return '<span class="chip c-'+p.phase+'">'+label+'</span>'+
+    var label = p.phase==="Unzipping" ? "Un-zipping" : (p.phase==="Downloading" ? "Downloading" : "Finalizing");
+    var sub   = p.phase==="Unzipping" ? "extracting image + reading md5" : (p.phase==="Downloading" ? "fetching + processing on the server" : "creating Artifact");
+    var cls   = p.phase==="Downloading" ? "Uploading" : p.phase;
+    return '<span class="chip c-'+cls+'">'+label+'</span>'+
            '<div class="uprog indet"><div></div></div>'+
            '<div class="upinfo">'+esc(sub)+'</div>';
   }

@@ -9,7 +9,8 @@ metadata:
 spec:
   selector:
     matchLabels:
-      eda.nokia.com/app: eda-imagemanager-node-agent
+      eda.nokia.com/app: eda-imagemanager
+      eda.nokia.com/component: node-agent
   updateStrategy:
     type: RollingUpdate
     rollingUpdate:
@@ -17,23 +18,49 @@ spec:
   template:
     metadata:
       labels:
-        eda.nokia.com/app: eda-imagemanager-node-agent
+        eda.nokia.com/app: eda-imagemanager
+        eda.nokia.com/component: node-agent
         eda.nokia.com/app-group: control-plane
     spec:
       # Dedicated SA with no RBAC binding; the agent makes zero API calls, so no
       # token is mounted (defence-in-depth: nothing to steal from a node pod).
       serviceAccountName: eda-imagemanager-node-agent
       automountServiceAccountToken: false
-      imagePullSecrets:
-        - name: ghcr-imagemanager
       # Sim pods schedule on any node, including control-plane in single-node
       # labs, so the redirect must exist on every node.
       tolerations:
         - operator: Exists
       terminationGracePeriodSeconds: 10
+      initContainers:
+        # Wait for the controller's /healthz before writing any containerd
+        # redirect, so a node never points at a not-yet-ready file server.
+        - name: wait-controller
+          image: ghcr.io/kkayhan/edaapp_imagemanager/imagemanager-controller:v26.4.2-27
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - -c
+            - |
+              import ssl, time, urllib.request
+              url = "https://eda-imagemanager:8443/healthz"
+              ctx = ssl.create_default_context()
+              ctx.check_hostname = False
+              ctx.verify_mode = ssl.CERT_NONE
+              for attempt in range(60):
+                  try:
+                      with urllib.request.urlopen(url, context=ctx, timeout=5) as resp:
+                          if resp.status == 200:
+                              print("controller ready", flush=True)
+                              raise SystemExit(0)
+                  except SystemExit:
+                      raise
+                  except Exception:
+                      pass
+                  time.sleep(5)
+              raise SystemExit("eda-imagemanager controller not ready after 5m")
       containers:
         - name: node-agent
-          image: ghcr.io/kkayhan/edaapp_imagemanager/imagemanager-controller:v26.4.2-26
+          image: ghcr.io/kkayhan/edaapp_imagemanager/imagemanager-controller:v26.4.2-27
           imagePullPolicy: IfNotPresent
           command: ["python3", "nodeagent.py"]
           env:
@@ -41,6 +68,11 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            # Set false (or scale this DaemonSet to 0) when not using SR-SIM pulls.
+            - name: NODE_AGENT_ENABLED
+              value: "true" # app-set: ${nodeAgentEnabled}
+            - name: RESYNC_SECONDS
+              value: "120"
             - name: PYTHONDONTWRITEBYTECODE   # don't try to write .pyc to the read-only root fs
               value: "1"
           # Root (to write the root-owned containerd config dir) but otherwise

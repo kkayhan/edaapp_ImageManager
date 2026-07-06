@@ -18,8 +18,11 @@ Artifact/status operations use the Kubernetes API (pod ServiceAccount token);
 the web UI sign-in is handled separately in auth.py (EDA OIDC / Keycloak).
 """
 
+import hashlib
+import json
 import logging
 import os
+import shutil
 import signal
 import threading
 import time
@@ -29,11 +32,11 @@ import fileserver
 import k8s
 import uploads
 
-VERSION = "v26.4.2-26"
+VERSION = "v26.4.2-27"
 UPLOAD_DIR = "/data/uploads"
 TLS_CRT = "/var/run/eda/tls/serving/tls.crt"
 PORT = 8443
-RECONCILE_INTERVAL = 30
+RECONCILE_INTERVAL = int(os.environ.get("RECONCILE_INTERVAL", "60"))
 
 CRD_GROUP = "imagemanager.eda.edacommunity.com"
 CRD_VERSION = "v1alpha1"
@@ -114,16 +117,18 @@ def _ensure_default_cr():
         logger.warning("Failed to ensure default %s: %s", CRD_KIND, e)
 
 
+_last_status_hash = [None]
+
+
 def _update_status(health, message, tracked):
     try:
         cr = k8s.read_cr(CRD_GROUP, CRD_VERSION, CRD_PLURAL, CRD_NAME)
         if not cr:
             return
         count, total_bytes = uploads.storage_stats()
-        cr["status"] = {
+        status = {
             "health": health,
             "message": message,
-            "lastReconcileTime": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "uploadsStored": count,
             "bytesStored": total_bytes,
             "artifacts": [
@@ -140,15 +145,48 @@ def _update_status(health, message, tracked):
             ],
             "version": VERSION,
         }
+        # Skip the status write when nothing meaningful changed, to avoid a PUT
+        # every reconcile cycle (reduces API churn on the cluster). The reconcile
+        # timestamp is deliberately excluded from the signature -- it changes
+        # every cycle and would defeat the check.
+        sig = hashlib.sha256(
+            json.dumps(status, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        if sig == _last_status_hash[0]:
+            return
+        status["lastReconcileTime"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        cr["status"] = status
         k8s.update_cr_status(CRD_GROUP, CRD_VERSION, CRD_PLURAL, CRD_NAME, cr)
+        _last_status_hash[0] = sig
     except Exception as e:
         logger.warning("Failed to update CRD status: %s", e)
+
+
+def _cleanup_orphan_work_dirs():
+    """At startup, remove any .incoming-*/.import-* temp dirs left behind by a
+    previous (crashed or killed) controller process. With replicas=1 + Recreate
+    no upload is in flight at startup, so every such dir is an orphan; clearing
+    them keeps abandoned partial uploads from accumulating on the PVC."""
+    removed = 0
+    try:
+        entries = os.listdir(UPLOAD_DIR)
+    except FileNotFoundError:
+        return
+    for entry in entries:
+        if entry.startswith(".incoming-") or entry.startswith(".import-"):
+            path = os.path.join(UPLOAD_DIR, entry)
+            if os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+                removed += 1
+    if removed:
+        logger.info("Removed %d orphan work dir(s) under %s", removed, UPLOAD_DIR)
 
 
 def main():
     _setup_logging()
     logger.info("Image Manager controller started (version %s)", VERSION)
     os.makedirs(UPLOAD_DIR, exist_ok=True)
+    _cleanup_orphan_work_dirs()
 
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)

@@ -46,6 +46,11 @@ logger = logging.getLogger("auth")
 POD_NAMESPACE = os.environ.get("POD_NAMESPACE", "eda-system")
 REALM = "eda"
 CLIENT_ID = "eda"
+# Browser-facing authorize URL goes through EDA's identity proxy — the SAME
+# Keycloak base the EDA GUI logs in through — so an already-logged-in EDA user
+# is 302'd back with a code and never sees a login form (seamless SSO in the
+# embedded panel). Server-to-server calls below still use KC_PROXY_PATH.
+IDENTITY_PROXY_PATH = "/core/proxy/v1/identity"
 KC_PROXY_PATH = "/core/httpproxy/v1/keycloak"
 # In-cluster Keycloak (server-to-server: admin token, client-secret, code exchange).
 KC_INTERNAL_BASE = f"https://eda-api.{POD_NAMESPACE}.svc{KC_PROXY_PATH}"
@@ -183,7 +188,9 @@ def authorize_url(headers, state):
         "redirect_uri": redirect_uri(headers),
         "state": state,
     })
-    return f"{base}{KC_PROXY_PATH}/realms/{REALM}/protocol/openid-connect/auth?{q}"
+    # Identity proxy (not KC_PROXY_PATH): its Keycloak session cookie matches the
+    # EDA GUI's, so an already-logged-in user is admitted with no login form.
+    return f"{base}{IDENTITY_PROXY_PATH}/realms/{REALM}/protocol/openid-connect/auth?{q}"
 
 
 def exchange_code(code, headers):
