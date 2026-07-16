@@ -14,3 +14,7 @@ private
 # Python bytecode (e.g. from local test runs)
 __pycache__/
 *.pyc
+
+# Catalog entries (manifest/docs/crds/settings) live only in the shared
+# eda-catalog repo (github.com/kkayhan/eda-catalog) — this repo is source-only.
+apps/
