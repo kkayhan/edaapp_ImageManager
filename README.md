@@ -46,7 +46,7 @@ Everything below is done in the **EDA web UI** — no command line needed.
 
 ### Step 1 — Register the app catalog (one‑time per cluster)
 
-EDA discovers installable apps through **Catalog** resources that point at a Git repository. This app lives in its own repository, so your cluster needs a Catalog pointing at it. (Each app/repository has its own Catalog — if you also run other community apps, this is a separate, additional entry.)
+EDA discovers installable apps through **Catalog** resources that point at a Git repository. This app is published to the shared **kkayhan community catalog**, so your cluster needs that one Catalog. (The same entry also brings the other community apps — Grafana, User Audit — so if you've already added it, skip this step.)
 
 In the EDA UI, open the **App Store → Catalogs** view (or the generic resource editor) and **create a new Catalog** with the following content:
 
@@ -54,15 +54,14 @@ In the EDA UI, open the **App Store → Catalogs** view (or the generic resource
 apiVersion: appstore.eda.nokia.com/v1
 kind: Catalog
 metadata:
-  name: imagemanager-catalog
+  name: kkayhan-catalog
   namespace: eda-system
 spec:
   enabled: true
   refreshInterval: 180
   remoteType: git
-  remoteURL: https://github.com/kkayhan/edaapp_ImageManager.git
-  skipTLSVerify: false
-  title: Image Manager
+  remoteURL: https://github.com/kkayhan/eda-catalog.git
+  title: kkayhan community catalog
 ```
 
 Within a few minutes the Catalog shows **Operational = true** and **EDA Image Manager** appears in the App Store.
@@ -240,14 +239,17 @@ Uninstall from the EDA Store (or remove the `AppInstaller`). This removes the co
 
 ## For maintainers
 
-This repository is both the **source** and the **app catalog**.
+This repository holds the **source only**. The installable app — its catalog entry,
+container images, and offline air-gap bundle — is published to the shared catalog repo
+**[kkayhan/eda-catalog](https://github.com/kkayhan/eda-catalog)**.
 
 - App project (edabuilder layout): repository root — `PROJECT`, `imagemanager/` (API types, controller, manifests), `common/`, `utils/`.
 - Controller source: [`imagemanager/build/controller/`](imagemanager/build/controller/).
 - Kubernetes manifests: [`imagemanager/manifests/`](imagemanager/manifests/).
-- Catalog entries (published by `edabuilder publish`): `apps/imagemanager.eda.edacommunity.com/`.
+- Container images: `ghcr.io/kkayhan/eda-catalog/imagemanager-{app,controller}` (hosted under the eda-catalog namespace).
+- Catalog entry (published by `edabuilder publish` to eda-catalog): `apps/imagemanager.eda.edacommunity.com/` on `github.com/kkayhan/eda-catalog`.
 
-Build & publish flow (high level): `docker build/push` the controller image → `edabuilder build-push` the app bundle to GHCR → `edabuilder publish app` the catalog entry + version tag → attach the offline bundle to the GitHub Release.
+Build & publish flow (high level): `docker build/push` the controller image + `edabuilder build-push` the app bundle to `ghcr.io/kkayhan/eda-catalog/…` → `edabuilder publish app … https://github.com/kkayhan/eda-catalog.git` for the catalog entry + version tag → attach the offline air-gap bundle to that repo's GitHub Release.
 
 **Versioning:** the app version tracks the EDA release it targets, as `v<eda-release>-<build>` — e.g. `v26.4.2-1`, `v26.4.2-2`, … against EDA `26.4.2` (the leading `v` matches EDA's own version string and is required by `edabuilder`). EDA cuts major releases on the 4th/8th/12th month each year (`26.4.x`, `26.8.x`, `26.12.x`, then `27.4.x`, …); the `-<build>` increments per app change within a given EDA release. The controller image and app bundle share this tag.
 
