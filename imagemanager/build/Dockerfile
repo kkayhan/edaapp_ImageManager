@@ -1,5 +1,5 @@
 FROM python:3.12-slim
-LABEL org.opencontainers.image.source="https://github.com/kkayhan/edaapp_ImageManager"
+LABEL org.opencontainers.image.source="https://github.com/kkayhan/eda-catalog"
 LABEL org.opencontainers.image.description="EDA Image Manager Controller"
 LABEL org.opencontainers.image.license="MIT"
 COPY controller/ /app/

@@ -35,7 +35,7 @@ spec:
         # Wait for the controller's /healthz before writing any containerd
         # redirect, so a node never points at a not-yet-ready file server.
         - name: wait-controller
-          image: ghcr.io/kkayhan/edaapp_imagemanager/imagemanager-controller:v26.4.2-27
+          image: ghcr.io/kkayhan/eda-catalog/imagemanager-controller:v26.4.2-27
           imagePullPolicy: IfNotPresent
           command:
             - python3
@@ -60,7 +60,7 @@ spec:
               raise SystemExit("eda-imagemanager controller not ready after 5m")
       containers:
         - name: node-agent
-          image: ghcr.io/kkayhan/edaapp_imagemanager/imagemanager-controller:v26.4.2-27
+          image: ghcr.io/kkayhan/eda-catalog/imagemanager-controller:v26.4.2-27
           imagePullPolicy: IfNotPresent
           command: ["python3", "nodeagent.py"]
           env:
