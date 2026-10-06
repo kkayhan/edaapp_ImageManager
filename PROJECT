@@ -1,4 +1,4 @@
-builderVersion: v26.4.2
+builderVersion: v26.8.2
 domain: eda.edacommunity.com
 name: imagemanager
 registry: ghcr.io/kkayhan/eda-catalog

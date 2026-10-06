@@ -167,7 +167,7 @@ machine:
 ```
 
 - `<ClusterIP>` → `kubectl -n eda-system get svc eda-imagemanager -o jsonpath='{.spec.clusterIP}'`
-- apply with no reboot → `talosctl -n <node> patch mc -p @mirror.json --mode=no-reboot`
+- apply with no reboot → `talosctl -n <node> patch mc -p @mirror.yaml --mode=no-reboot` (a strategic‑merge patch in exactly the YAML shape above; a JSON‑6902 patch is refused on the multi‑document machine configs recent Talos/EDA installers generate: *"JSON6902 patches are not supported for multi-document machine configuration"*)
 - re‑apply after a reinstall — the ClusterIP can change.
 
 The sim **NodeProfile** (from the Details popup) then looks like:
@@ -191,6 +191,17 @@ spec:
 ```
 
 Create that NodeProfile (plus a `NodeUser` named `admin` in the namespace — the license ConfigMap is already created for you if you attached a key), then a `NetworkTopology` referencing it (`platform: "7750 SR-1"`) — the Digital Twin pulls the image from Image Manager and boots the simulated SR OS node.
+
+**EDA 26.8+ — label the node for a security profile.** Give the node (the `NetworkTopology` node template, i.e. the resulting `TopoNode`) the label `eda.nokia.com/security-profile: managed`. EDA mints a node's bootstrap certificate (`…/sros/server-<node>/edaboot.crt`, which the SR OS boot script downloads before anything else) only for nodes that match a `NodeSecurityProfile`; an unlabelled node gets no certificate and the simulator exits after ten download attempts (`eda-bsvr` logs *no matching nodeSecurityProfiles found*). The same label applies to hardware nodes bootstrapped from the images above.
+
+```yaml
+  nodeTemplates:
+    - name: srsim
+      nodeProfile: srsim-26.3.r3
+      platform: "7750 SR-1"
+      labels:
+        eda.nokia.com/security-profile: managed
+```
 
 ---
 
@@ -250,6 +261,8 @@ container images, and offline air-gap bundle — is published to the shared cata
 - Catalog entry (published by `edabuilder publish` to eda-catalog): `apps/imagemanager.eda.edacommunity.com/` on `github.com/kkayhan/eda-catalog`.
 
 Build & publish flow (high level): `docker build/push` the controller image + `edabuilder build-push` the app bundle to `ghcr.io/kkayhan/eda-catalog/…` → `edabuilder publish app … https://github.com/kkayhan/eda-catalog.git` for the catalog entry + version tag → attach the offline air-gap bundle to that repo's GitHub Release.
+
+**Compatibility:** `v26.8.2-N` builds target EDA 26.8 (Core API `v6.0.0`, built with `edabuilder v26.8.2`); the last 26.4 build is `v26.4.2-27` (Core API `v5.0.0-0`, branch `line/26.4.2`). The 26.8 line additionally sends its own `Content-Security-Policy` on HTML responses, because the 26.8 `eda-api` proxy injects a `default-src 'self'` policy on proxied pages that carry none, which blocks the UI's inline script.
 
 **Versioning:** the app version tracks the EDA release it targets, as `v<eda-release>-<build>` — e.g. `v26.4.2-1`, `v26.4.2-2`, … against EDA `26.4.2` (the leading `v` matches EDA's own version string and is required by `edabuilder`). EDA cuts major releases on the 4th/8th/12th month each year (`26.4.x`, `26.8.x`, `26.12.x`, then `27.4.x`, …); the `-<build>` increments per app change within a given EDA release. The controller image and app bundle share this tag.
 

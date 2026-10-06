@@ -81,6 +81,17 @@ def _filename_from_url(url):
     return base or "import.zip"
 
 
+# Content-Security-Policy for every HTML page this app serves. EDA 26.8+ eda-api
+# injects "default-src 'self'" on proxied responses that carry NO CSP of their own,
+# which blocks this single-file UI's inline <script>/<style> entirely (the page
+# then sits at "Loading..." with an empty namespace dropdown). A backend-supplied
+# policy passes through the proxy unchanged (Grafana's and the EDA docs' do), so
+# we send one that mirrors the EDA UI's own policy: same-origin everything, inline
+# script/style allowed (the UI is one inline IIFE + one inline stylesheet), no eval.
+HTML_CSP = ("default-src 'self'; script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+            "frame-ancestors 'self'; form-action 'self';")
+
 # Material-styled standalone message page (sign-out / access-denied). Mirrors the
 # EDA palette + the saved Light/Dark preference used by the main UI.
 _MSG_PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
@@ -135,6 +146,8 @@ class Handler(BaseHTTPRequestHandler):
         body = text.encode("utf-8") if isinstance(text, str) else text
         self.send_response(code)
         self.send_header("Content-Type", ctype)
+        if ctype.startswith("text/html"):
+            self.send_header("Content-Security-Policy", HTML_CSP)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -225,6 +238,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self._set_cookie(auth.SESSION_COOKIE, "", 0)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Security-Policy", HTML_CSP)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -1196,6 +1210,10 @@ def _nodeprofile_yaml(nos, version, namespace, prof_name, image_entries, yang_ur
         "    - option: 42-NTPServers",
         "      value:",
         "      - <ntp-server-ip>",
+        "# EDA 26.8+: give the node (NetworkTopology nodeTemplate / TopoNode) the label",
+        "#   eda.nokia.com/security-profile: managed",
+        "# so it matches a NodeSecurityProfile; EDA mints the node's bootstrap",
+        "# certificate (edaboot.crt) only for nodes that match one.",
     ]
     return "\n".join(L)
 
@@ -1387,6 +1405,10 @@ def _sim_nodeprofile_yaml(version, namespace, prof_name, container_image, yang_u
         "  onboardingPassword: NokiaSrl1!",
         "  dhcp:",
         "    managementPoolv4: <your-ipv4-mgmt-pool>",
+        "# EDA 26.8+: give the node (NetworkTopology nodeTemplate / TopoNode) the label",
+        "#   eda.nokia.com/security-profile: managed",
+        "# so it matches a NodeSecurityProfile; without one EDA never mints the node's",
+        "# bootstrap certificate (edaboot.crt) and the simulator exits before booting.",
     ]
     return "\n".join(L)
 

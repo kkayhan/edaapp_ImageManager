@@ -18,3 +18,6 @@ __pycache__/
 # Catalog entries (manifest/docs/crds/settings) live only in the shared
 # eda-catalog repo (github.com/kkayhan/eda-catalog) — this repo is source-only.
 apps/
+
+# edabuilder build-push output (unsigned sigstore bundle) — build artifact, not source
+.sign/
