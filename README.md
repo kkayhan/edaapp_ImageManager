@@ -248,13 +248,16 @@ The `imagemanager-trust-bundle` ConfigMaps the app created in its target namespa
 
 ```bash
 kubectl -n eda get cm imagemanager-trust-bundle -o jsonpath='{.data.trust-bundle\.pem}' | openssl x509 -noout -subject -fingerprint -sha256
-kubectl -n eda-system exec deploy/eda-imagemanager -- cat /var/run/eda/tls/serving/ca.crt | openssl x509 -noout -subject -fingerprint -sha256
+kubectl -n eda-system exec $(kubectl -n eda-system get pod -l 'eda.nokia.com/app=eda-imagemanager,!eda.nokia.com/component' -o name) -- cat /var/run/eda/tls/serving/ca.crt | openssl x509 -noout -subject -fingerprint -sha256
 ```
 
-If the fingerprints differ, write the current CA into the ConfigMap; `eda-asvr` retries the Failed images within seconds, no re-upload needed:
+Select the controller pod by label as shown; `kubectl exec deploy/eda-imagemanager` can land in the node-agent pod (it carries the same `eda.nokia.com/app` label), which has no such file.
+
+If the fingerprints differ, write the current CA into the ConfigMap; `eda-asvr` retries the Failed images within seconds, no re-upload needed. The middle command must print a subject; if it errors, the file is empty, so stop and do not apply it:
 
 ```bash
-kubectl -n eda-system exec deploy/eda-imagemanager -- cat /var/run/eda/tls/serving/ca.crt > imagemanager-ca.crt
+kubectl -n eda-system exec $(kubectl -n eda-system get pod -l 'eda.nokia.com/app=eda-imagemanager,!eda.nokia.com/component' -o name) -- cat /var/run/eda/tls/serving/ca.crt > imagemanager-ca.crt
+openssl x509 -in imagemanager-ca.crt -noout -subject
 kubectl -n eda create configmap imagemanager-trust-bundle --from-file=trust-bundle.pem=imagemanager-ca.crt --dry-run=client -o yaml | kubectl apply -f -
 ```
 
