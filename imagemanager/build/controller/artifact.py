@@ -7,9 +7,11 @@ file from us, validates it against the md5, and re-hosts it. eda-asvr's pull
 client does NOT trust eda-internal-ca by default, so each Artifact also sets
 spec.trustBundle to a per-namespace ConfigMap holding our serving CA (see
 ensure_trust_bundle); without it the pull fails x509 unknown-authority.
+reconcile_trust keeps those ConfigMaps current when EDA re-keys its CAs.
 """
 
 import logging
+import re
 from urllib.parse import quote, urlsplit
 
 import k8s
@@ -38,33 +40,118 @@ SERVICE_PORT = 8443
 TRUST_BUNDLE_CM = "imagemanager-trust-bundle"
 TRUST_BUNDLE_KEY = "trust-bundle.pem"
 SERVING_CA_PATH = "/var/run/eda/tls/serving/ca.crt"
-_ca_cache = [None]
+# EDA's own internal trust set: the current CA plus any rollover CA that
+# trust-manager carries while EDA re-keys it. Adding it lets the ConfigMap
+# cover both the leaf we serve now and the one the CSI driver issues next.
+CLUSTER_TRUST_CM = "eda-internal-trust-bundle"
+CLUSTER_TRUST_NS = "eda-system"
+
+_PEM_CERT_RE = re.compile(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", re.S)
 
 
-def _serving_ca():
-    if _ca_cache[0] is None:
-        try:
-            with open(SERVING_CA_PATH) as f:
-                _ca_cache[0] = f.read()
-        except OSError:
-            _ca_cache[0] = ""
-    return _ca_cache[0]
+def _pem_certs(text):
+    """The certificates in a PEM text, normalised so equal certs compare equal."""
+    out = []
+    for m in _PEM_CERT_RE.finditer(text or ""):
+        lines = [ln.strip() for ln in m.group(0).splitlines() if ln.strip()]
+        out.append("\n".join(lines) + "\n")
+    return out
+
+
+def trusted_cas():
+    """CA certificates eda-asvr needs to pull from us, read fresh on every call:
+    EDA re-keys its CAs (every 30 days on 26.4; the 26.8 internal root every
+    ~9 months), so a copy taken at startup goes stale. [] = no serving CA, i.e.
+    plain-HTTP mode, where no trust bundle is needed."""
+    try:
+        with open(SERVING_CA_PATH) as f:
+            certs = _pem_certs(f.read())
+    except OSError:
+        certs = []
+    if not certs:
+        return []
+    try:
+        cm = k8s.read_configmap(CLUSTER_TRUST_CM, CLUSTER_TRUST_NS) or {}
+        certs += _pem_certs((cm.get("data") or {}).get(TRUST_BUNDLE_KEY, ""))
+    except Exception as e:  # noqa: BLE001 - the serving CA alone still works
+        logger.info("Cluster trust bundle %s/%s unreadable: %s",
+                    CLUSTER_TRUST_NS, CLUSTER_TRUST_CM, e)
+    return list(dict.fromkeys(certs))
 
 
 def ensure_trust_bundle(namespace):
-    """Ensure a trust-bundle ConfigMap with our serving CA exists in `namespace`.
-    Returns the ConfigMap name, or None if we have no CA (plain-HTTP mode)."""
-    ca = _serving_ca()
-    if not ca.strip():
+    """Ensure `namespace` has a trust-bundle ConfigMap that holds every CA in
+    trusted_cas(). Returns the ConfigMap name, or None if we have no CA
+    (plain-HTTP mode) or could not create it.
+
+    An existing ConfigMap is rewritten only when a CA we need is missing from
+    it: EDA re-keyed the CA, or the ConfigMap is left over from an earlier
+    install (it is created at runtime, so an app uninstall keeps it). eda-asvr
+    watches the ConfigMap, so Failed pulls that use it recover at once, but
+    every write also makes eda-asvr re-download each Artifact that uses it --
+    hence no write while the content already covers what we serve."""
+    cas = trusted_cas()
+    if not cas:
         return None
-    if k8s.read_configmap(TRUST_BUNDLE_CM, namespace) is None:
+    data = {TRUST_BUNDLE_KEY: "".join(cas)}
+    labels = {MANAGED_LABEL: "true"}
+    cm = k8s.read_configmap(TRUST_BUNDLE_CM, namespace)
+    if cm is None:
         try:
-            k8s.create_configmap(TRUST_BUNDLE_CM, namespace, {TRUST_BUNDLE_KEY: ca})
+            k8s.create_configmap(TRUST_BUNDLE_CM, namespace, data, labels=labels)
             logger.info("Created trust bundle ConfigMap %s/%s", namespace, TRUST_BUNDLE_CM)
         except Exception as e:
+            if getattr(e, "code", None) == 409:  # an upload and the reconcile raced
+                return TRUST_BUNDLE_CM
             logger.warning("Failed to create trust bundle CM in %s: %s", namespace, e)
             return None
+        return TRUST_BUNDLE_CM
+    have = set(_pem_certs((cm.get("data") or {}).get(TRUST_BUNDLE_KEY, "")))
+    missing = [c for c in cas if c not in have]
+    if missing:
+        try:
+            k8s.replace_configmap(TRUST_BUNDLE_CM, namespace, data, labels=labels)
+            logger.warning("Refreshed trust bundle ConfigMap %s/%s: it lacked %d of the "
+                           "%d CA(s) EDA now uses (CA re-keyed, or left over from an "
+                           "earlier install); eda-asvr re-pulls the Artifacts that use it",
+                           namespace, TRUST_BUNDLE_CM, len(missing), len(cas))
+        except Exception as e:
+            logger.warning("Failed to refresh trust bundle CM in %s: %s", namespace, e)
     return TRUST_BUNDLE_CM
+
+
+def reconcile_trust():
+    """Keep each namespace's trust bundle current, and attach it to managed
+    HTTPS Artifacts that were created without one, so pulls that fail
+    'x509: certificate signed by unknown authority' heal without a re-upload."""
+    by_ns = {}
+    for art in list_managed_artifacts():
+        ns = (art.get("metadata") or {}).get("namespace")
+        if ns:
+            by_ns.setdefault(ns, []).append(art)
+    for ns, arts in sorted(by_ns.items()):
+        try:
+            tb = ensure_trust_bundle(ns)
+        except Exception as e:  # noqa: BLE001 - one namespace must not stop the rest
+            logger.warning("Trust bundle check failed in %s: %s", ns, e)
+            continue
+        if not tb:
+            continue
+        for art in arts:
+            spec = art.get("spec") or {}
+            url = (spec.get("remoteFileUrl") or {}).get("fileUrl", "")
+            status = (art.get("status") or {}).get("downloadStatus", "")
+            if spec.get("trustBundle") or not url.startswith("https://") \
+                    or status == "Available":
+                continue
+            name = art["metadata"]["name"]
+            try:
+                k8s.patch_namespaced_cr(ARTIFACT_GROUP, ARTIFACT_VERSION, ns,
+                                        ARTIFACT_PLURAL, name, {"spec": {"trustBundle": tb}})
+                logger.warning("Artifact %s/%s had no trustBundle (status %s); set it to %s",
+                               ns, name, status or "pending", tb)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Failed to set trustBundle on Artifact %s/%s: %s", ns, name, e)
 
 
 def default_base_url(pod_namespace):

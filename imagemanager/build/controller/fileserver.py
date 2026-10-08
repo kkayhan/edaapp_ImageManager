@@ -12,7 +12,8 @@ Serves three audiences on one port:
   * eda-asvr, connecting directly to the Service to PULL an uploaded file:
       GET/HEAD /files/<uploadId>/<filename>[.md5]
 TLS: serving cert from the cert-manager CSI mount (issuer eda-internal-issuer),
-which eda-asvr trusts via the internal CA.
+which eda-asvr trusts via the internal CA. The CSI driver renews the cert in
+place while the pod runs; each new connection uses the cert currently on disk.
 """
 
 import html
@@ -1498,21 +1499,82 @@ def _build_ssl_context():
     return ctx
 
 
+CERT_RECHECK_SECONDS = 30
+
+
+class _ServingCert:
+    """Server TLS context that follows the CSI-mounted serving cert. The CSI
+    driver re-issues tls.crt/tls.key in place (720h cert, renewed 240h before
+    expiry); a context built once at startup would keep serving the first leaf
+    until it expires on day 30, and every eda-asvr pull would then fail
+    'x509: certificate has expired'. The files are checked at most every
+    CERT_RECHECK_SECONDS; a failed reload keeps the current context."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._ctx = None
+        self._sig = None
+        self._next_check = 0.0
+
+    @staticmethod
+    def _signature():
+        sig = ()
+        for name in ("tls.crt", "tls.key"):
+            st = os.stat(os.path.join(TLS_DIR, name))
+            sig += (st.st_ino, st.st_mtime_ns, st.st_size)
+        return sig
+
+    def context(self):
+        if self._ctx is not None and time.monotonic() < self._next_check:
+            return self._ctx
+        with self._lock:
+            now = time.monotonic()
+            if self._ctx is not None and now < self._next_check:
+                return self._ctx
+            self._next_check = now + CERT_RECHECK_SECONDS
+            try:
+                sig = self._signature()
+                if sig != self._sig:
+                    ctx = _build_ssl_context()
+                    if ctx is not None:
+                        if self._ctx is not None:
+                            logger.info("Serving cert renewed on disk; new connections use it")
+                        self._ctx, self._sig = ctx, sig
+            except Exception as e:  # noqa: BLE001 - e.g. read mid-renewal: retry next check
+                if self._ctx is None:
+                    logger.error("Failed to load serving cert from %s: %s", TLS_DIR, e)
+                else:
+                    logger.warning("Serving cert reload failed, keeping the current one: %s", e)
+            return self._ctx
+
+
+_SERVING_CERT = _ServingCert()
+
+
+class _TLSServer(ThreadingHTTPServer):
+    """Wraps each accepted connection with the CURRENT serving cert."""
+
+    def get_request(self):
+        sock, addr = self.socket.accept()
+        try:
+            return _SERVING_CERT.context().wrap_socket(sock, server_side=True), addr
+        except Exception as e:
+            sock.close()
+            # OSError is what serve_forever expects from get_request (drops the client)
+            raise OSError(f"TLS handshake with {addr[0]} failed: {e}") from e
+
+
 def start_file_server(port=8443):
     """Start the HTTPS file server as a daemon thread. Falls back to HTTP if no cert."""
-    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-    ctx = None
-    try:
-        ctx = _build_ssl_context()
-    except Exception as e:
-        logger.error("Failed to load serving cert from %s: %s", TLS_DIR, e)
+    ctx = _SERVING_CERT.context()
     if ctx is not None:
-        server.socket = ctx.wrap_socket(server.socket, server_side=True)
+        server = _TLSServer(("0.0.0.0", port), Handler)
         scheme = "https"
     else:
         logger.error("No serving cert at %s -- starting PLAIN HTTP (kubelet HTTPS "
                      "probes and eda-asvr HTTPS pulls will fail until cert present)",
                      TLS_DIR)
+        server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
         scheme = "http"
     t = threading.Thread(target=server.serve_forever, daemon=True, name="fileserver")
     t.start()

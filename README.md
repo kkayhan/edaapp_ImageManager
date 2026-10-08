@@ -238,12 +238,34 @@ Its **status** also reports overall health and a list of every artifact the app 
 
 Uninstall from the EDA Store (or remove the `AppInstaller`). This removes the controller, its Service/proxy/RBAC, and **its PersistentVolumeClaim** — i.e. the app's stored images are deleted. Because this app is the **durable origin** `eda-asvr` pulls from (see _What it's for_ above), uninstalling breaks every Artifact it created: `eda-asvr` keeps no permanent copy of its own and will fail to re‑pull the files the next time its pod restarts. Before uninstalling, move any images you still need into a permanent store and re‑point their Artifacts there.
 
+The `imagemanager-trust-bundle` ConfigMaps the app created in its target namespaces are **not** removed (they are created at run time, not installed). They are harmless; delete them with `kubectl -n <namespace> delete configmap imagemanager-trust-bundle` if you want a clean cluster. A later install refreshes any that are still there.
+
+---
+
+## Troubleshooting
+
+**An image stays `Failed` with `tls: failed to verify certificate: x509: certificate signed by unknown authority`.** `eda-asvr` does not trust the certificate this app serves, because the `imagemanager-trust-bundle` ConfigMap in that namespace holds an old CA: EDA re-keyed its internal CA, or the ConfigMap was left over from an earlier install. From v26.8.2-2 the app repairs this by itself within a minute. On an older version, compare the two CAs (namespace `eda` shown):
+
+```bash
+kubectl -n eda get cm imagemanager-trust-bundle -o jsonpath='{.data.trust-bundle\.pem}' | openssl x509 -noout -subject -fingerprint -sha256
+kubectl -n eda-system exec deploy/eda-imagemanager -- cat /var/run/eda/tls/serving/ca.crt | openssl x509 -noout -subject -fingerprint -sha256
+```
+
+If the fingerprints differ, write the current CA into the ConfigMap; `eda-asvr` retries the Failed images within seconds, no re-upload needed:
+
+```bash
+kubectl -n eda-system exec deploy/eda-imagemanager -- cat /var/run/eda/tls/serving/ca.crt > imagemanager-ca.crt
+kubectl -n eda create configmap imagemanager-trust-bundle --from-file=trust-bundle.pem=imagemanager-ca.crt --dry-run=client -o yaml | kubectl apply -f -
+```
+
+`kubectl apply` warns once that the ConfigMap lacks the `last-applied-configuration` annotation; that is harmless.
+
 ---
 
 ## How it works under the hood
 
 - The controller is a small, dependency‑free Python 3 process (standard library only). It creates `Artifact` CRs and reports status through the **Kubernetes API**, authenticating with its pod ServiceAccount token. The **web UI** is protected by **EDA single sign‑on** — an OIDC Authorization‑Code flow against EDA's Keycloak (reached in‑cluster via `eda-api`) — and is restricted to users holding an allowed EDA role (default `system-administrator`).
-- It serves its file‑pull endpoint over **HTTPS** using a certificate issued by EDA's internal CA (via the cert‑manager CSI driver). Because `eda-asvr`'s download client does **not** trust that CA by default, the controller also creates a small trust‑bundle ConfigMap in each target namespace and sets `spec.trustBundle` on every Artifact — so `eda-asvr` can pull from it securely with no manual setup.
+- It serves its file‑pull endpoint over **HTTPS** using a certificate issued by EDA's internal CA (via the cert‑manager CSI driver). Because `eda-asvr`'s download client does **not** trust that CA by default, the controller also creates a small trust‑bundle ConfigMap (`imagemanager-trust-bundle`) in each target namespace and sets `spec.trustBundle` on every Artifact — so `eda-asvr` can pull from it securely with no manual setup. Every reconcile cycle it re-checks that ConfigMap against the CA EDA currently uses (EDA re-keys its CAs) and rewrites it only when a CA is missing, because each rewrite makes `eda-asvr` re-download the Artifacts that use it. The serving certificate is renewed in place by the CSI driver and picked up without a restart.
 - The PersistentVolumeClaim is the **durable** source of truth for uploaded bytes — `eda-asvr` keeps no permanent store of its own and re‑pulls from this app on restart, so the files are retained for the life of their Artifacts (never auto‑purged); they are removed only when you delete the Artifact. The `Artifact` resources are the source of truth for status.
 
 ---

@@ -5,8 +5,9 @@ Long-running controller that:
   * serves an upload web UI + an in-cluster file-serve endpoint (fileserver.py),
   * on upload, stores the file on the PVC and creates an Artifact CR pointing
     eda-asvr back at this app to pull + re-host the file,
-  * reconciles every RECONCILE_INTERVAL: mirrors each Artifact's download status
-    into ImageManagerConfig.status for the UI and computes storage stats.
+  * reconciles every RECONCILE_INTERVAL: keeps the per-namespace trust bundle
+    eda-asvr pulls with in step with EDA's CAs, mirrors each Artifact's download
+    status into ImageManagerConfig.status for the UI and computes storage stats.
 
 This app is the DURABLE origin eda-asvr pulls from: eda-asvr keeps no persistent
 store of its own (its re-hosted copy lives on ephemeral pod storage) and
@@ -28,11 +29,12 @@ import threading
 import time
 from datetime import datetime, timezone
 
+import artifact
 import fileserver
 import k8s
 import uploads
 
-VERSION = "v26.8.2-1"
+VERSION = "v26.8.2-2"
 UPLOAD_DIR = "/data/uploads"
 TLS_CRT = "/var/run/eda/tls/serving/tls.crt"
 PORT = 8443
@@ -204,6 +206,11 @@ def main():
         cycle_start = time.time()
         cfg = _read_config()
         fileserver.set_config(cfg)
+
+        try:
+            artifact.reconcile_trust()
+        except Exception as e:
+            logger.warning("Trust bundle reconcile failed: %s", e)
 
         health, message = "ok", "All systems operational"
         tracked = []

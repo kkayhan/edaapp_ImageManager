@@ -6,7 +6,8 @@ All requests have a 30-second timeout.
 The image-manager controller talks ONLY to the K8s API (via the pod's
 ServiceAccount token):
   - cluster-scoped CRUD on its own ImageManagerConfig (one "default" instance)
-  - namespaced create + read of Artifact CRs (artifacts.eda.nokia.com/v1)
+  - namespaced create + read + patch of Artifact CRs (artifacts.eda.nokia.com/v1)
+  - the per-namespace trust-bundle ConfigMap eda-asvr pulls with (artifact.py)
   - cluster-wide list of Artifacts (to mirror download status into the UI)
 No Keycloak / EDA REST API is used.
 """
@@ -49,7 +50,7 @@ def _retry_delay(attempt, err):
     return min(max(delay, 1), 8) * (attempt + 1)
 
 
-def _request(method, path, body=None):
+def _request(method, path, body=None, content_type="application/json"):
     url = _K8S_BASE + path
     data = json.dumps(body).encode("utf-8") if body is not None else None
     last_err = None
@@ -58,7 +59,7 @@ def _request(method, path, body=None):
         req.add_header("Authorization", f"Bearer {_token()}")
         req.add_header("Accept", "application/json")
         if data:
-            req.add_header("Content-Type", "application/json")
+            req.add_header("Content-Type", content_type)
         try:
             with urlopen(req, context=_ssl_ctx(), timeout=_TIMEOUT) as resp:
                 raw = resp.read()
@@ -131,6 +132,15 @@ def list_cr_all_namespaces(group, version, plural, label_selector=None):
         path += "?" + urlencode({"labelSelector": label_selector})
     obj = _request("GET", path)
     return (obj or {}).get("items", [])
+
+
+def patch_namespaced_cr(group, version, namespace, plural, name, patch):
+    """JSON merge-patch (RFC 7386) a namespaced CR, e.g. {"spec": {"field": v}}."""
+    path = (
+        f"/apis/{group}/{version}/namespaces/{quote(namespace, safe='')}"
+        f"/{plural}/{quote(name, safe='')}"
+    )
+    return _request("PATCH", path, patch, content_type="application/merge-patch+json")
 
 
 def delete_namespaced_cr(group, version, namespace, plural, name):
